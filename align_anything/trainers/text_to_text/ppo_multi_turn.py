@@ -205,13 +205,14 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             self.reward_critic_tokenizer = self.tokenizer
         self.generation_config = GenerationConfig(
             max_length=self.cfgs.model_cfgs.model_max_length,
+            max_new_tokens=self.cfgs.model_cfgs.max_new_tokens,
             temperature=self.cfgs.model_cfgs.temperature,
             top_p=self.cfgs.model_cfgs.top_p,
             repetition_penalty=self.cfgs.model_cfgs.repetition_penalty,
             do_sample=True,
             bos_token_id=self.tokenizer.bos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
+            pad_token_id=self.tokenizer.pad_token_id
         )
 
     def init_check(self) -> None:
@@ -408,6 +409,20 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             self.logger.print("WARNING: RAGEN not available or agent proxy not initialized. Falling back to single-turn.")
             return self.single_turn_actor_step(mini_prompt_only_batch)
         
+        # Extract initial prompts for printing
+        initial_prompts = mini_prompt_only_batch['input_ids']
+        batch_size = initial_prompts.shape[0]
+        
+        # Print initial prompts
+        if is_main_process():
+            print("\n" + "="*80)
+            print("MULTI-TURN CONVERSATION ROLLOUT")
+            print("="*80)
+            for i in range(batch_size):
+                prompt_text = self.tokenizer.decode(initial_prompts[i], skip_special_tokens=True)
+                print(f"\n--- Conversation {i+1} ---")
+                print(f"Initial Prompt: {prompt_text}")
+        
         # Create DataProto from mini_prompt_only_batch
         dataproto = DataProto()
         dataproto.batch = {
@@ -423,34 +438,103 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             'validate': False
         }
         
+        # Store conversation history for printing
+        conversation_history = [[] for _ in range(batch_size)]
+        
         # Perform multi-turn rollout using the agent proxy
         # This will handle the full environment interaction loop
         rollouts = self.agent_proxy.rollout(dataproto, val=False)
         
-        # Convert rollouts back to actor_batch format
+        # Print the multi-turn conversation results
+        if is_main_process():
+            final_sequences = rollouts.batch['input_ids']
+            for i in range(batch_size):
+                print(f"\n--- Conversation {i+1} Final Result ---")
+                full_conversation = self.tokenizer.decode(final_sequences[i], skip_special_tokens=True)
+                print(f"Full Conversation: {full_conversation}")
+                
+                # Try to extract individual turns if possible
+                turns = self.extract_conversation_turns(full_conversation)
+                for turn_idx, turn in enumerate(turns):
+                    print(f"  Turn {turn_idx + 1}: {turn}")
+                    
+                # Print rewards if available
+                if 'token_level_rewards' in rollouts.batch:
+                    rewards = rollouts.batch['token_level_rewards'][i]
+                    total_reward = rewards.sum().item()
+                    print(f"  Total Reward: {total_reward:.4f}")
+                    
+            print("="*80)
+        
+        # Get the current device for proper tensor placement
+        device = next(self.actor_model.parameters()).device
+        
+        # Convert rollouts back to actor_batch format and ensure all tensors are on the correct device
         actor_batch = {
-            'input_ids': rollouts.batch['input_ids'],
-            'attention_mask': rollouts.batch['attention_mask'],
+            'input_ids': rollouts.batch['input_ids'].to(device),
+            'attention_mask': rollouts.batch['attention_mask'].to(device),
         }
         
         # Add additional fields needed for training
         if 'response_mask' in rollouts.batch:
-            actor_batch['response_mask'] = rollouts.batch['response_mask']
+            actor_batch['response_mask'] = rollouts.batch['response_mask'].to(device)
         if 'loss_mask' in rollouts.batch:
-            actor_batch['loss_mask'] = rollouts.batch['loss_mask']
+            actor_batch['loss_mask'] = rollouts.batch['loss_mask'].to(device)
         if 'token_level_rewards' in rollouts.batch:
-            actor_batch['token_level_rewards'] = rollouts.batch['token_level_rewards']
+            actor_batch['token_level_rewards'] = rollouts.batch['token_level_rewards'].to(device)
         if 'rm_scores' in rollouts.batch:
             # Convert rm_scores to token_level_rewards if not already present
             if 'token_level_rewards' not in actor_batch:
-                actor_batch['token_level_rewards'] = rollouts.batch['rm_scores']
+                actor_batch['token_level_rewards'] = rollouts.batch['rm_scores'].to(device)
             
         return actor_batch
+    
+    def extract_conversation_turns(self, full_conversation: str) -> list[str]:
+        """Extract individual turns from a full conversation string."""
+        # This is a simple heuristic - you might need to adjust based on your data format
+        turns = []
+        
+        # Common patterns for conversation turns
+        patterns = [
+            r'Human:.*?(?=Assistant:|$)',
+            r'Assistant:.*?(?=Human:|$)',
+            r'User:.*?(?=Bot:|$)',
+            r'Bot:.*?(?=User:|$)',
+            r'Q:.*?(?=A:|$)',
+            r'A:.*?(?=Q:|$)',
+        ]
+        
+        import re
+        for pattern in patterns:
+            matches = re.findall(pattern, full_conversation, re.DOTALL | re.IGNORECASE)
+            if matches:
+                turns.extend([match.strip() for match in matches])
+                break
+        
+        # If no patterns match, split by common delimiters
+        if not turns:
+            # Try splitting by newlines or common separators
+            potential_turns = full_conversation.split('\n\n')
+            turns = [turn.strip() for turn in potential_turns if turn.strip()]
+        
+        return turns if turns else [full_conversation]
     
     def single_turn_actor_step(self, mini_prompt_only_batch: PromptOnlyBatch) -> dict[str, Any]:
         """Standard single-turn actor step."""
         infer_batch = self.infer_batch(mini_prompt_only_batch)
         actor_batch = copy.deepcopy(infer_batch)
+        
+        # Print input prompts
+        if is_main_process():
+            print("\n" + "="*80)
+            print("SINGLE-TURN GENERATION")
+            print("="*80)
+            batch_size = mini_prompt_only_batch['input_ids'].shape[0]
+            for i in range(batch_size):
+                prompt_text = self.tokenizer.decode(mini_prompt_only_batch['input_ids'][i], skip_special_tokens=True)
+                print(f"\n--- Generation {i+1} ---")
+                print(f"Input Prompt: {prompt_text}")
+        
         sequences = self.actor_model.module.generate(
             **infer_batch,
             generation_config=self.generation_config,
@@ -460,10 +544,32 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
         attention_mask = sequences.not_equal(self.tokenizer.pad_token_id)
         actor_batch['input_ids'] = sequences
         actor_batch['attention_mask'] = attention_mask
+        
+        # Print generated outputs
+        if is_main_process():
+            batch_size = sequences.shape[0]
+            for i in range(batch_size):
+                full_text = self.tokenizer.decode(sequences[i], skip_special_tokens=True)
+                # Extract just the generated part (remove the prompt)
+                prompt_text = self.tokenizer.decode(mini_prompt_only_batch['input_ids'][i], skip_special_tokens=True)
+                if full_text.startswith(prompt_text):
+                    generated_text = full_text[len(prompt_text):].strip()
+                else:
+                    generated_text = full_text
+                    
+                print(f"Generated Response: {generated_text}")
+            print("="*80)
+        
         return actor_batch
 
     def reward_model_step(self, actor_batch: PromptOnlyBatch) -> dict[str, Any]:
         reward_batch = copy.deepcopy(actor_batch)
+        
+        # Ensure all tensors are on the correct device
+        device = next(self.actor_model.parameters()).device
+        for key in reward_batch:
+            if isinstance(reward_batch[key], torch.Tensor):
+                reward_batch[key] = reward_batch[key].to(device)
         
         # Handle multi-turn reward computation
         if self.multi_turn and 'token_level_rewards' in actor_batch:
@@ -557,6 +663,13 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
 
             mini_batch['input_ids'] = reward_batch['input_ids']
             mini_batch['attention_mask'] = actor_batch['attention_mask']
+            
+            # Ensure all tensors are on the correct device
+            device = next(self.actor_model.parameters()).device
+            for key in mini_batch:
+                if isinstance(mini_batch[key], torch.Tensor):
+                    mini_batch[key] = mini_batch[key].to(device)
+            
             # add rollout results to the batches
             micro_inference_batches.append(mini_batch)
             micro_training_batches.append(micro_training_batch)
@@ -598,6 +711,18 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
         attention_mask = inference_batch['attention_mask']
 
         sequence_mask = attention_mask[:, 1:]
+        
+        # Print reward information for debugging
+        if is_main_process() and self.global_step % 10 == 0:  # Print every 10 steps to avoid spam
+            print(f"\n--- RL Step {self.global_step} ---")
+            print(f"Batch size: {input_ids.shape[0]}")
+            print(f"Sequence length: {input_ids.shape[1]}")
+            print(f"Average reward: {reward.mean().item():.4f}")
+            print(f"Reward std: {reward.std().item():.4f}")
+            if self.multi_turn and 'token_level_rewards' in training_batch:
+                token_rewards = training_batch['token_level_rewards']
+                print(f"Token-level rewards shape: {token_rewards.shape}")
+                print(f"Average token reward: {token_rewards.mean().item():.4f}")
         
         # Use response_mask for multi-turn or fallback to start index
         if self.multi_turn and 'response_mask' in training_batch:
@@ -927,7 +1052,14 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                 input_ids = lm_inputs.batch['input_ids']
                 attention_mask = lm_inputs.batch['attention_mask']
                 
+                # Ensure tensors are on the correct device
+                device = next(self.actor_model.parameters()).device
+                input_ids = input_ids.to(device)
+                attention_mask = attention_mask.to(device)
+                
                 # Generate using the actor model
+                shape = input_ids.shape
+                
                 with torch.no_grad():
                     sequences = self.actor_model.module.generate(
                         input_ids=input_ids,

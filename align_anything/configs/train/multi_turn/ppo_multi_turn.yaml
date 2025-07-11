@@ -12,7 +12,7 @@ system:
 
 # Basic training parameters
 micro_batch_size_per_gpu: 1
-ppo_mini_batch_size: 2
+ppo_mini_batch_size: 1
 model_path: "Qwen/Qwen2.5-0.5B-Instruct"
 enable_response_mask: true
 grpo_advantage_length_weight: false

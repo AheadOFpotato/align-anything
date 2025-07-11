@@ -104,6 +104,7 @@ class Logger:
                         name=log_run_name,
                         dir=log_dir,
                         config=config,
+                        mode='offline'
                     )
 
                 if log_dir is not None:
