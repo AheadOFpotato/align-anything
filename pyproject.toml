@@ -32,7 +32,7 @@ classifiers = [
 
 dependencies = [
     "torch",
-    "torchvision",
+    "torchvision", 
     "torchaudio",
     "transformers >= 4.50.0",
     "datasets",
@@ -48,6 +48,8 @@ dependencies = [
     "gradio",
     "librosa",
     "soundfile",
+    "hydra-core",
+    "omegaconf",
 ]
 
 dynamic = ["version"]

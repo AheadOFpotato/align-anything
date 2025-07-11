@@ -1,0 +1,215 @@
+# Multi-Turn PPO Configuration aligned with RAGEN base.yaml
+# This configuration demonstrates multi-turn RL where rewards come from the environment directly
+defaults:
+  - ppo_trainer # this is a symbolic link to the verl/verl/trainer/config/ppo_trainer.yaml file的路上；
+  - envs
+  - _self_
+
+# System configuration
+system:
+  CUDA_VISIBLE_DEVICES: "0"
+
+# Basic training parameters
+micro_batch_size_per_gpu: 1
+ppo_mini_batch_size: 2
+model_path: "Qwen/Qwen2.5-0.5B-Instruct"
+enable_response_mask: true
+grpo_advantage_length_weight: false
+
+
+# LoRA configuration
+lora:
+  rank: 0
+  alpha: 16
+  target_modules: "all-linear"
+
+train_cfgs:
+  # Multi-turn specific configurations
+  multi_turn: true
+  bi_level_gae: true
+  high_level_gamma: 0.95
+  max_turn: 5
+  
+  # Explicitly disable reward and critic models in multi-turn mode
+  # (Environment provides rewards directly)
+  use_reward_model: false
+  use_reward_critic: false
+  
+  # Standard PPO configurations
+  epochs: 1
+  kl_coeff: 0.000
+  clip_range_ratio: 0.2
+  clip_range_score: 1000
+  clip_range_value: 0.2
+  ptx_coeff: 0.0
+  gamma: 1.0
+  gae_lambda: 1.0
+  
+  # Training parameters aligned with RAGEN
+  per_device_prompt_batch_size: 8
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 5.0e-7
+  lr_scheduler_type: 'cosine'
+  warmup_ratio: 0.03
+  total_training_steps: 200
+  
+  seed: 42
+
+# Actor rollout and reference model configuration
+actor_rollout_ref:
+  model:
+    path: ${model_path}
+    lora_rank: ${lora.rank}
+    lora_alpha: ${lora.alpha}
+    target_modules: ${lora.target_modules}
+  actor:
+    ppo_mini_batch_size: ${ppo_mini_batch_size}
+    micro_batch_size_per_gpu: ${micro_batch_size_per_gpu}
+    ppo_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu}
+    use_ref: true
+    entropy_coeff: 0.001
+    use_kl_loss: false
+    kl_loss_coef: 0.000
+    kl_loss_type: "kl"
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    grpo_advantage_length_weight: ${grpo_advantage_length_weight}
+  ref:
+    log_prob_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu}
+  rollout:
+    log_prob_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu}
+    tensor_model_parallel_size: 1
+    max_model_len: 2048
+    prompt_length: 1
+    response_length: 128
+    gpu_memory_utilization: 0.85
+    max_num_batched_tokens: 8192
+    temperature: 1
+    rollout_filter_ratio: 0.25
+    rollout_filter_type: "std"
+    enforce_eager: true
+    free_cache_engine: true
+    val_kwargs:
+      do_sample: true
+      temperature: 0.5
+    tp_size_check: true
+
+# Critic model configuration
+critic:
+  ppo_mini_batch_size: ${ppo_mini_batch_size}
+  ppo_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu}
+  model:
+    path: ${model_path}
+    lora_rank: ${lora.rank}
+    lora_alpha: ${lora.alpha}
+    target_modules: ${lora.target_modules}
+
+# Data configuration
+data:
+  max_prompt_length: null
+  max_response_length: null
+  train_batch_size: null
+
+# Algorithm configuration
+algorithm:
+  gamma: 1.0
+  lam: 1.0
+  high_level_gamma: 0.95
+  adv_estimator: "gae"
+  bi_level_gae: false
+  kl_penalty: "kl"
+  kl_ctrl:
+    type: "fixed"
+    kl_coef: 0.000
+
+# Trainer configuration
+trainer:
+  project_name: "align_anything_multi_turn"
+  experiment_name: "env_rewards"
+  total_training_steps: 200
+  validation_steps: 1
+  val_before_train: true
+  n_gpus_per_node: 1
+  test_freq: 10
+  generations_to_log_to_wandb:
+    train: 128
+    val: 20
+  logger: ["console", "wandb"]
+
+# Agent Proxy configuration (aligned with RAGEN)
+agent_proxy:
+  max_context_window: -1
+  max_turn: 5
+  action_sep: "||"
+  max_actions_per_turn: 5
+  use_turn_scores: false
+  enable_think: true
+  reward_normalization:
+    grouping: "state"
+    method: "identity"
+
+# Environment State Manager configuration (aligned with RAGEN)
+es_manager:
+  format_penalty: -0.1
+  train:
+    env_groups: 8
+    group_size: 16
+    env_configs:
+      tags: ["SimpleSokoban"]
+      n_groups: [8]
+  val:
+    env_groups: 256
+    group_size: 1
+    env_configs:
+      tags: ["SimpleSokoban"]
+      n_groups: [256]
+
+# Context Manager configuration (aligned with RAGEN)
+ctx_manager:
+  generation:
+    gen_config:
+      response_length: ${actor_rollout_ref.rollout.response_length}
+      temperature: ${actor_rollout_ref.rollout.temperature}
+      top_p: 1.0
+      top_k: -1
+      kwargs: null
+
+# Model configurations (aligned with RAGEN structure)
+model_cfgs:
+  actor_model_name_or_path: ${model_path}
+  # These are intentionally left empty since we don't use reward models in multi-turn
+  reward_model_name_or_path: ""
+  reward_critic_model_name_or_path: ""
+  model_max_length: 2048
+  temperature: 1.0
+  top_p: 1.0
+  repetition_penalty: 1.0
+  trust_remote_code: true
+
+# Data configurations (pointing to RAGEN data location)
+data_cfgs:
+  train_datasets: ["align_anything/utils/ragen_utils/data/train"]
+  eval_datasets: ["align_anything/utils/ragen_utils/data/val"]
+  
+# BNB and LoRA configurations (if needed)
+bnb_cfgs: null
+lora_cfgs: 
+  rank: ${lora.rank}
+  alpha: ${lora.alpha}
+  target_modules: ${lora.target_modules}
+
+# DeepSpeed configuration (minimal for compatibility)
+deepspeed_cfgs:
+  stage: 2
+  bf16:
+    enabled: true
+  optimizer:
+    type: "AdamW"
+    params:
+      lr: 5.0e-7
+      betas: [0.9, 0.999]
+      eps: 1e-8
+      weight_decay: 0.01
+  zero_optimization:
+    stage: 2

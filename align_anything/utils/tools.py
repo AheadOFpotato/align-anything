@@ -41,6 +41,7 @@ from transformers.tokenization_utils import BatchEncoding, PaddingStrategy, Trun
 from transformers.utils.import_utils import requires_backends
 
 from align_anything.utils.device_utils import manual_seed_all
+from align_anything.utils.config_utils import read_hydra_cfgs, read_cfgs_with_hydra
 
 
 def convert_to_rgb(image: ImageInput) -> ImageInput:
