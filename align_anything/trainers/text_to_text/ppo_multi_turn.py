@@ -89,6 +89,13 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
         self.ds_train_cfgs = prepare_ds_train_cfgs(custom_cfgs=cfgs.train_cfgs, raw_ds_cfgs=ds_cfgs)
         self.ds_eval_cfgs = prepare_ds_eval_cfgs(custom_cfgs=cfgs.train_cfgs, raw_ds_cfgs=ds_cfgs)
         self.global_step = 0
+        self.use_ptx = False # not elegant
+        
+        # Multi-turn specific configurations
+        self.multi_turn = getattr(self.cfgs.train_cfgs, 'multi_turn', False)
+        self.bi_level_gae = getattr(self.cfgs.train_cfgs, 'bi_level_gae', False)
+        self.high_level_gamma = getattr(self.cfgs.train_cfgs, 'high_level_gamma', 1.0)
+        self.max_turn = getattr(self.cfgs.train_cfgs, 'max_turn', 3)
 
         self.init_check()
         dist.barrier()
@@ -100,11 +107,12 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
         if hasattr(self.reward_model, 'infer_batch'):
             self.reward_infer_batch = self.reward_model.infer_batch
         dist.barrier()
+        self.init_logger()
+        dist.barrier()
         self.init_datasets()
         dist.barrier()
         self.init_engines()
-        dist.barrier()
-        self.init_logger()
+
 
         self.kl_coeff = self.cfgs.train_cfgs.kl_coeff
         self.clip_range_ratio = self.cfgs.train_cfgs.clip_range_ratio
@@ -113,12 +121,6 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
         self.ptx_coeff = self.cfgs.train_cfgs.ptx_coeff
         self.gamma = self.cfgs.train_cfgs.gamma
         self.gae_lambda = self.cfgs.train_cfgs.gae_lambda
-        
-        # Multi-turn specific configurations
-        self.multi_turn = getattr(self.cfgs.train_cfgs, 'multi_turn', False)
-        self.bi_level_gae = getattr(self.cfgs.train_cfgs, 'bi_level_gae', False)
-        self.high_level_gamma = getattr(self.cfgs.train_cfgs, 'high_level_gamma', 1.0)
-        self.max_turn = getattr(self.cfgs.train_cfgs, 'max_turn', 3)
         
         # Initialize agent proxy for multi-turn rollouts if needed
         if self.multi_turn:
@@ -246,140 +248,133 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
 
     def init_ragen_datasets(self) -> None:
         """Initialize datasets for RAGEN data format."""
-        try:
-            # Import RAGEN data loader if available
-            from align_anything.utils.ragen_utils.data import load_ragen_data
+        # Import RAGEN data loader if available
+        from align_anything.utils.ragen_utils.data import load_ragen_data
+        
+        # Load RAGEN format data
+        train_data_path = os.path.join(
+            os.path.dirname(__file__), 
+            "..", "..", "utils", "ragen_utils", "data", "train"
+        )
+        eval_data_path = os.path.join(
+            os.path.dirname(__file__), 
+            "..", "..", "utils", "ragen_utils", "data", "val"
+        )
+        
+        # Create simplified dataloaders for RAGEN data
+        # In multi-turn mode, the actual data comes from environment interaction
+        # These are just placeholder dataloaders for prompts
+        
+        class RAGENPromptDataset(Dataset):
+            def __init__(self, data_path, tokenizer, max_length=2048):
+                self.tokenizer = tokenizer
+                self.max_length = max_length
+                # Load simple prompts for environment initialization
+                self.prompts = self.load_prompts(data_path)
             
-            # Load RAGEN format data
-            train_data_path = os.path.join(
-                os.path.dirname(__file__), 
-                "..", "..", "utils", "ragen_utils", "data", "train"
-            )
-            eval_data_path = os.path.join(
-                os.path.dirname(__file__), 
-                "..", "..", "utils", "ragen_utils", "data", "val"
-            )
-            
-            # Create simplified dataloaders for RAGEN data
-            # In multi-turn mode, the actual data comes from environment interaction
-            # These are just placeholder dataloaders for prompts
-            
-            class RAGENPromptDataset(Dataset):
-                def __init__(self, data_path, tokenizer, max_length=2048):
-                    self.tokenizer = tokenizer
-                    self.max_length = max_length
-                    # Load simple prompts for environment initialization
-                    self.prompts = self.load_prompts(data_path)
-                
-                def load_prompts(self, data_path):
-                    """Load prompts from RAGEN data directory."""
-                    if os.path.exists(data_path):
-                        # Try to load from various possible file formats
-                        import json
-                        prompts = []
-                        for file_ext in ['.json', '.jsonl', '.txt']:
-                            file_path = os.path.join(data_path, f'prompts{file_ext}')
-                            if os.path.exists(file_path):
-                                if file_ext == '.json':
-                                    with open(file_path, 'r') as f:
-                                        data = json.load(f)
-                                        if isinstance(data, list):
-                                            prompts.extend([item.get('prompt', str(item)) for item in data])
-                                elif file_ext == '.jsonl':
-                                    with open(file_path, 'r') as f:
-                                        for line in f:
-                                            item = json.loads(line.strip())
-                                            prompts.append(item.get('prompt', str(item)))
-                                elif file_ext == '.txt':
-                                    with open(file_path, 'r') as f:
-                                        prompts.extend([line.strip() for line in f if line.strip()])
-                                break
-                        
-                        if not prompts:
-                            # Fallback: create default prompts for environment interaction
-                            prompts = [
-                                "Let's solve this step by step.",
-                                "What should I do next?",
-                                "Please help me with this task.",
-                                "I need to complete this objective."
-                            ]
-                        return prompts
-                    else:
-                        # Default prompts if data path doesn't exist
-                        return [
+            def load_prompts(self, data_path):
+                """Load prompts from RAGEN data directory."""
+                if os.path.exists(data_path):
+                    # Try to load from various possible file formats
+                    import json
+                    prompts = []
+                    for file_ext in ['.json', '.jsonl', '.txt']:
+                        file_path = os.path.join(data_path, f'prompts{file_ext}')
+                        if os.path.exists(file_path):
+                            if file_ext == '.json':
+                                with open(file_path, 'r') as f:
+                                    data = json.load(f)
+                                    if isinstance(data, list):
+                                        prompts.extend([item.get('prompt', str(item)) for item in data])
+                            elif file_ext == '.jsonl':
+                                with open(file_path, 'r') as f:
+                                    for line in f:
+                                        item = json.loads(line.strip())
+                                        prompts.append(item.get('prompt', str(item)))
+                            elif file_ext == '.txt':
+                                with open(file_path, 'r') as f:
+                                    prompts.extend([line.strip() for line in f if line.strip()])
+                            break
+                    
+                    if not prompts:
+                        # Fallback: create default prompts for environment interaction
+                        prompts = [
                             "Let's solve this step by step.",
-                            "What should I do next?", 
+                            "What should I do next?",
                             "Please help me with this task.",
                             "I need to complete this objective."
                         ]
+                    return prompts
+                else:
+                    # Default prompts if data path doesn't exist
+                    return [
+                        "Let's solve this step by step.",
+                        "What should I do next?", 
+                        "Please help me with this task.",
+                        "I need to complete this objective."
+                    ]
+            
+            def __len__(self):
+                return len(self.prompts)
+            
+            def __getitem__(self, idx):
+                prompt = self.prompts[idx % len(self.prompts)]
                 
-                def __len__(self):
-                    return len(self.prompts)
+                # Tokenize the prompt
+                tokenized = self.tokenizer(
+                    prompt,
+                    max_length=self.max_length,
+                    padding='max_length',
+                    truncation=True,
+                    return_tensors='pt'
+                )
                 
-                def __getitem__(self, idx):
-                    prompt = self.prompts[idx % len(self.prompts)]
-                    
-                    # Tokenize the prompt
-                    tokenized = self.tokenizer(
-                        prompt,
-                        max_length=self.max_length,
-                        padding='max_length',
-                        truncation=True,
-                        return_tensors='pt'
-                    )
-                    
+                return {
+                    'input_ids': tokenized['input_ids'].squeeze(0),
+                    'attention_mask': tokenized['attention_mask'].squeeze(0),
+                }
+            
+            def get_collator(self):
+                """Return a simple collator for batching."""
+                def collate_fn(batch):
+                    input_ids = torch.stack([item['input_ids'] for item in batch])
+                    attention_mask = torch.stack([item['attention_mask'] for item in batch])
                     return {
-                        'input_ids': tokenized['input_ids'].squeeze(0),
-                        'attention_mask': tokenized['attention_mask'].squeeze(0),
+                        'input_ids': input_ids,
+                        'attention_mask': attention_mask,
                     }
-                
-                def get_collator(self):
-                    """Return a simple collator for batching."""
-                    def collate_fn(batch):
-                        input_ids = torch.stack([item['input_ids'] for item in batch])
-                        attention_mask = torch.stack([item['attention_mask'] for item in batch])
-                        return {
-                            'input_ids': input_ids,
-                            'attention_mask': attention_mask,
-                        }
-                    return collate_fn
+                return collate_fn
+        
+        # Create datasets
+        train_dataset = RAGENPromptDataset(train_data_path, self.tokenizer)
+        eval_dataset = RAGENPromptDataset(eval_data_path, self.tokenizer)
+        
+        # Create dataloaders
+        
+        self.prompt_only_dataloader = DataLoader(
+            train_dataset,
+            collate_fn=train_dataset.get_collator(),
+            sampler=DistributedSampler(train_dataset, shuffle=True),
+            batch_size=int(self.cfgs.train_cfgs.per_device_prompt_batch_size),
+        )
+        
+        self.eval_dataloader = DataLoader(
+            eval_dataset,
+            collate_fn=eval_dataset.get_collator(),
+            sampler=DistributedSampler(eval_dataset, shuffle=False),
+            batch_size=int(self.cfgs.train_cfgs.per_device_train_batch_size),
+        ) if self.cfgs.data_cfgs.eval_datasets else None
+        
+        # PTX dataloader (not used in multi-turn mode typically)
+        self.ptx_dataloader = DataLoader(
+            train_dataset,  # Reuse train dataset
+            collate_fn=train_dataset.get_collator(),
+            sampler=DistributedSampler(train_dataset, shuffle=True),
+            batch_size=int(self.cfgs.train_cfgs.per_device_train_batch_size),
+        )
+        
+        self.logger.print(f"Loaded RAGEN datasets: train={len(train_dataset)}, eval={len(eval_dataset) if eval_dataset else 0}")
             
-            # Create datasets
-            train_dataset = RAGENPromptDataset(train_data_path, self.tokenizer)
-            eval_dataset = RAGENPromptDataset(eval_data_path, self.tokenizer)
-            
-            # Create dataloaders
-            
-            self.prompt_only_dataloader = DataLoader(
-                train_dataset,
-                collate_fn=train_dataset.get_collator(),
-                sampler=DistributedSampler(train_dataset, shuffle=True),
-                batch_size=int(self.cfgs.train_cfgs.per_device_prompt_batch_size),
-            )
-            
-            self.eval_dataloader = DataLoader(
-                eval_dataset,
-                collate_fn=eval_dataset.get_collator(),
-                sampler=DistributedSampler(eval_dataset, shuffle=False),
-                batch_size=int(self.cfgs.train_cfgs.per_device_train_batch_size),
-            ) if self.cfgs.data_cfgs.eval_datasets else None
-            
-            # PTX dataloader (not used in multi-turn mode typically)
-            self.ptx_dataloader = DataLoader(
-                train_dataset,  # Reuse train dataset
-                collate_fn=train_dataset.get_collator(),
-                sampler=DistributedSampler(train_dataset, shuffle=True),
-                batch_size=int(self.cfgs.train_cfgs.per_device_train_batch_size),
-            )
-            
-            self.logger.info(f"Loaded RAGEN datasets: train={len(train_dataset)}, eval={len(eval_dataset) if eval_dataset else 0}")
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to load RAGEN datasets: {e}. Falling back to standard datasets.")
-            # Fallback to standard dataset loading
-            self.prompt_only_dataloader, self.eval_dataloader, self.ptx_dataloader = (
-                self.get_dataloaders(PromptOnlyDataset, PromptOnlyDataset, SupervisedDataset)
-            )
 
     def init_engines(self) -> None:
         """Initialize DeepSpeed engines."""
@@ -410,7 +405,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
     def multi_turn_actor_step(self, mini_prompt_only_batch: PromptOnlyBatch) -> dict[str, Any]:
         """Perform multi-turn rollout using agent proxy."""
         if not RAGEN_AVAILABLE or self.agent_proxy is None:
-            self.logger.warning("RAGEN not available or agent proxy not initialized. Falling back to single-turn.")
+            self.logger.print("WARNING: RAGEN not available or agent proxy not initialized. Falling back to single-turn.")
             return self.single_turn_actor_step(mini_prompt_only_batch)
         
         # Create DataProto from mini_prompt_only_batch
@@ -910,76 +905,72 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
     def init_agent_proxy(self) -> None:
         """Initialize agent proxy for multi-turn rollouts."""
         if not RAGEN_AVAILABLE:
-            self.logger.warning("RAGEN utils not available. Multi-turn functionality will be limited.")
+            self.logger.print("WARNING: RAGEN utils not available. Multi-turn functionality will be limited.")
             self.agent_proxy = None
             return
             
-        try:
-            # Initialize context and environment state managers
-            self.train_ctx_manager = ContextManager(self.cfgs, self.tokenizer, mode="train")
-            self.train_es_manager = EnvStateManager(self.cfgs, mode="train") 
-            self.val_ctx_manager = ContextManager(self.cfgs, self.tokenizer, mode="val")
-            self.val_es_manager = EnvStateManager(self.cfgs, mode="val")
+        # Initialize context and environment state managers
+        self.train_ctx_manager = ContextManager(self.cfgs, self.tokenizer, mode="train")
+        self.train_es_manager = EnvStateManager(self.cfgs, mode="train") 
+        self.val_ctx_manager = ContextManager(self.cfgs, self.tokenizer, mode="val")
+        self.val_es_manager = EnvStateManager(self.cfgs, mode="val")
+        
+        # Create a simple wrapper for the actor model to work with agent proxy
+        class SimpleActorWrapper:
+            def __init__(self, actor_model, tokenizer, generation_config):
+                self.actor_model = actor_model
+                self.tokenizer = tokenizer
+                self.generation_config = generation_config
             
-            # Create a simple wrapper for the actor model to work with agent proxy
-            class SimpleActorWrapper:
-                def __init__(self, actor_model, tokenizer, generation_config):
-                    self.actor_model = actor_model
-                    self.tokenizer = tokenizer
-                    self.generation_config = generation_config
+            def generate_sequences(self, lm_inputs):
+                """Generate sequences using the actor model."""
+                input_ids = lm_inputs.batch['input_ids']
+                attention_mask = lm_inputs.batch['attention_mask']
                 
-                def generate_sequences(self, lm_inputs):
-                    """Generate sequences using the actor model."""
-                    input_ids = lm_inputs.batch['input_ids']
-                    attention_mask = lm_inputs.batch['attention_mask']
-                    
-                    # Generate using the actor model
-                    with torch.no_grad():
-                        sequences = self.actor_model.module.generate(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            generation_config=self.generation_config,
-                            synced_gpus=True,
-                            do_sample=True,
-                        )
-                    
-                    # Decode the generated sequences to text
-                    response_texts = []
-                    for i, seq in enumerate(sequences):
-                        # Extract only the generated part (after the input)
-                        input_len = input_ids[i].shape[0]
-                        generated_seq = seq[input_len:]
-                        response_text = self.tokenizer.decode(generated_seq, skip_special_tokens=True)
-                        response_texts.append(response_text)
-                    
-                    # Create output DataProto
-                    lm_outputs = DataProto()
-                    lm_outputs.non_tensor_batch = {
-                        'response_texts': response_texts,
-                        'env_ids': lm_inputs.non_tensor_batch.get('env_ids', list(range(len(response_texts)))),
-                        'group_ids': lm_inputs.non_tensor_batch.get('group_ids', list(range(len(response_texts))))
-                    }
-                    lm_outputs.meta_info = lm_inputs.meta_info
-                    return lm_outputs
+                # Generate using the actor model
+                with torch.no_grad():
+                    sequences = self.actor_model.module.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        generation_config=self.generation_config,
+                        synced_gpus=True,
+                        do_sample=True,
+                    )
+                
+                # Decode the generated sequences to text
+                response_texts = []
+                for i, seq in enumerate(sequences):
+                    # Extract only the generated part (after the input)
+                    input_len = input_ids[i].shape[0]
+                    generated_seq = seq[input_len:]
+                    response_text = self.tokenizer.decode(generated_seq, skip_special_tokens=True)
+                    response_texts.append(response_text)
+                
+                # Create output DataProto
+                lm_outputs = DataProto()
+                lm_outputs.non_tensor_batch = {
+                    'response_texts': response_texts,
+                    'env_ids': lm_inputs.non_tensor_batch.get('env_ids', list(range(len(response_texts)))),
+                    'group_ids': lm_inputs.non_tensor_batch.get('group_ids', list(range(len(response_texts))))
+                }
+                lm_outputs.meta_info = lm_inputs.meta_info
+                return lm_outputs
+        
+        actor_wg = SimpleActorWrapper(self.actor_model, self.tokenizer, self.generation_config)
+        
+        # Create agent proxy with environment managers
+        self.agent_proxy = LLMAgentProxy(
+            config=self.cfgs,
+            actor_rollout_wg=actor_wg,
+            tokenizer=self.tokenizer
+        )
+        
+        # Override the agent proxy's managers with our own
+        self.agent_proxy.train_ctx_manager = self.train_ctx_manager
+        self.agent_proxy.train_es_manager = self.train_es_manager
+        self.agent_proxy.val_ctx_manager = self.val_ctx_manager
+        self.agent_proxy.val_es_manager = self.val_es_manager
             
-            actor_wg = SimpleActorWrapper(self.actor_model, self.tokenizer, self.generation_config)
-            
-            # Create agent proxy with environment managers
-            self.agent_proxy = LLMAgentProxy(
-                config=self.cfgs,
-                actor_rollout_wg=actor_wg,
-                tokenizer=self.tokenizer
-            )
-            
-            # Override the agent proxy's managers with our own
-            self.agent_proxy.train_ctx_manager = self.train_ctx_manager
-            self.agent_proxy.train_es_manager = self.train_es_manager
-            self.agent_proxy.val_ctx_manager = self.val_ctx_manager
-            self.agent_proxy.val_es_manager = self.val_es_manager
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize agent proxy: {e}")
-            self.agent_proxy = None
 
 
 def main():
@@ -991,7 +982,7 @@ def main():
     parser.add_argument('--local_rank', type=int, default=-1,
                        help='Local rank for distributed training')
     
-    args, unknown = parser.parse_known_args()
+    args, unparsed_args = parser.parse_known_args()
     
     # Setup distributed training
     deepspeed.init_distributed()
@@ -999,50 +990,15 @@ def main():
     torch_set_device(current_device)
     
     # Load configuration using Hydra
-    try:
-        cfg, ds_cfgs = read_hydra_cfgs(args.config_name, task="multi_turn", overrides=None)
-        dict_cfgs = OmegaConf.to_container(cfg, resolve=True)
-    except Exception as e:
-        print(f"Error loading Hydra config: {e}")
-        print("Falling back to legacy config loading...")
-        
-        # Fallback to legacy config loading
-        from align_anything.utils.tools import read_cfgs
-        task = os.path.join('multi_turn', args.config_name)
-        try:
-            dict_cfgs, ds_cfgs = read_cfgs(mode='train', task=task)
-        except:
-            # If task-specific config doesn't exist, use general ppo config
-            task = os.path.join('text_to_text', 'ppo')
-            dict_cfgs, ds_cfgs = read_cfgs(mode='train', task=task)
-            
-            # Override with multi-turn settings
-            dict_cfgs['train_cfgs']['multi_turn'] = True
-            dict_cfgs['train_cfgs']['bi_level_gae'] = True
-            dict_cfgs['train_cfgs']['high_level_gamma'] = 0.95
-            dict_cfgs['train_cfgs']['max_turn'] = 3
+    cfg, ds_cfgs = read_hydra_cfgs(args.config_name, task="multi_turn", overrides=None)
+    dict_cfgs = OmegaConf.to_container(cfg, resolve=True)
     
     # Parse additional command line arguments
-    for i in range(0, len(unknown), 2):
-        if i + 1 < len(unknown):
-            key = unknown[i].lstrip('--').replace('-', '_')
-            value = unknown[i + 1]
-            
-            # Try to convert to appropriate type
-            try:
-                if value.lower() in ['true', 'false']:
-                    value = value.lower() == 'true'
-                elif '.' in value:
-                    value = float(value)
-                else:
-                    value = int(value)
-            except ValueError:
-                pass  # Keep as string
-            
-            # Update config
-            if 'train_cfgs' not in dict_cfgs:
-                dict_cfgs['train_cfgs'] = {}
-            dict_cfgs['train_cfgs'][key] = value
+    keys = [k[2:] for k in unparsed_args[0::2]]
+    values = list(unparsed_args[1::2])
+    unparsed_args = dict(zip(keys, values))
+    for k, v in unparsed_args.items():
+        dict_cfgs = update_dict(dict_cfgs, custom_cfgs_to_dict(k, v))
     
     # Convert to named tuple
     cfgs = dict_to_namedtuple(dict_cfgs)

@@ -91,7 +91,7 @@ def dict_to_namedtuple(dic):
         def __getattr__(self, item):
             return None
 
-    cfgs = EnhancedNamedTuple(**{k: convert(v) for k, v in dic.items()})
+    cfgs = EnhancedNamedTuple(**{k: convert(v) if k not in {'custom_envs'} else v for k, v in dic.items()}) # not elegant
     return cfgs
 
 

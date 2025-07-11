@@ -4,6 +4,7 @@ defaults:
   - ppo_trainer # this is a symbolic link to the verl/verl/trainer/config/ppo_trainer.yaml file的路上；
   - envs
   - _self_
+  - ppo
 
 # System configuration
 system:
@@ -181,7 +182,7 @@ model_cfgs:
   # These are intentionally left empty since we don't use reward models in multi-turn
   reward_model_name_or_path: ""
   reward_critic_model_name_or_path: ""
-  model_max_length: 2048
+  model_max_length: 4096
   temperature: 1.0
   top_p: 1.0
   repetition_penalty: 1.0

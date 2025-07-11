@@ -92,7 +92,7 @@ class ContextManager:
         self.action_sep = self.config.agent_proxy.action_sep
         self.special_token_list = ["<think>", "</think>", "<answer>", "</answer>", "<|im_start|>", "<|im_end|>"]
 
-        self.es_cfg = self.config.es_manager[mode]
+        self.es_cfg = getattr(self.config.es_manager, mode)
         self.env_nums = {
                 env_tag: n_group * self.es_cfg.group_size
                 for n_group, env_tag in zip(self.es_cfg.env_configs.n_groups, self.es_cfg.env_configs.tags)
@@ -112,8 +112,8 @@ class ContextManager:
             if env_tag not in self.es_cfg.env_configs.tags:
                 continue
 
-            self._check_env_installed(env_config.env_type)
-            env_config_new = asdict(REGISTERED_ENV_CONFIGS[env_config.env_type]())
+            self._check_env_installed(env_config['env_type'])
+            env_config_new = asdict(REGISTERED_ENV_CONFIGS[env_config['env_type']]())
             for k,v in env_config.items():
                 env_config_new[k] = v
             env_instruction = env_config_new.get("env_instruction", "")

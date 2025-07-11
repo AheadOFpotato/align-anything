@@ -132,7 +132,7 @@ class LLMAgentProxy:
 		# 	lm_outputs = unpad_dataproto(padded_lm_outputs, pad_size=pad_size)
 		# 	lm_outputs.meta_info = lm_inputs.meta_info
 		# 	lm_outputs.non_tensor_batch = lm_inputs.non_tensor_batch
-		if isinstance(self.actor_wg, VllmWrapperWg) or isinstance(self.actor_wg, ApiCallingWrapperWg):
+		if isinstance(self.actor_wg, VllmWrapperWg) or isinstance(self.actor_wg, ApiCallingWrapperWg) or True: # not elegant
 			lm_outputs = self.actor_wg.generate_sequences(lm_inputs)
 		else:
 			raise ValueError(f"Unsupported actor worker type: {type(self.actor_wg)}")

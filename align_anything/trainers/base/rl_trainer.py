@@ -45,6 +45,8 @@ class RLTrainerBase:
         self.cfgs = cfgs
         self.lora_cfgs = cfgs.lora_cfgs
         self.bnb_cfgs = cfgs.bnb_cfgs
+        self.use_ptx = False # not elegant
+        self.use_reward_critic = getattr(cfgs.train_cfgs, 'use_reward_critic', True) # not elegant
 
     def init_check(self) -> None:
         """Initial configuration checking."""
@@ -248,15 +250,16 @@ class RLTrainerBase:
         )
         self.actor_reference_model.eval()
         # initialize the critic model engines
-        self.reward_critic_model = self._init_train_deepspeed_engine(
-            model=self.reward_critic_model,
-            weight_decay=self.cfgs.train_cfgs.critic_weight_decay,
-            lr=self.cfgs.train_cfgs.critic_lr,
-            lr_scheduler_type=self.cfgs.train_cfgs.critic_lr_scheduler_type,
-            lr_warmup_ratio=self.cfgs.train_cfgs.critic_lr_warmup_ratio,
-            total_training_steps=self.total_update_steps,
-            ds_cfgs=self.ds_train_cfgs,
-        )
+        if self.use_reward_critic:
+            self.reward_critic_model = self._init_train_deepspeed_engine(
+                model=self.reward_critic_model,
+                weight_decay=self.cfgs.train_cfgs.critic_weight_decay,
+                lr=self.cfgs.train_cfgs.critic_lr,
+                lr_scheduler_type=self.cfgs.train_cfgs.critic_lr_scheduler_type,
+                lr_warmup_ratio=self.cfgs.train_cfgs.critic_lr_warmup_ratio,
+                total_training_steps=self.total_update_steps,
+                ds_cfgs=self.ds_train_cfgs,
+            )
         if (
             self.reward_model is not None
         ):  # NOTE when self.reward_model is None, it means using remote reward model
@@ -268,19 +271,21 @@ class RLTrainerBase:
         # setup the gradient checkpointing
         if self.cfgs.train_cfgs.actor_gradient_checkpointing and not self.lora_enabled:
             self.actor_model.gradient_checkpointing_enable()
-        if self.cfgs.train_cfgs.critic_gradient_checkpointing and not self.lora_enabled:
+        if self.cfgs.train_cfgs.critic_gradient_checkpointing and not self.lora_enabled and self.use_reward_critic:
             self.reward_critic_model.gradient_checkpointing_enable()
 
     def set_train(self, mode: bool = True) -> None:
         """Set training mode for all models."""
         if mode:
             self.actor_model.train()
-            self.reward_critic_model.train()
+            if self.use_reward_critic:
+                self.reward_critic_model.train()
             if self.cfgs.train_cfgs.actor_gradient_checkpointing and not self.lora_enabled:
                 self.actor_model.gradient_checkpointing_enable()
         else:
             self.actor_model.eval()
-            self.reward_critic_model.eval()
+            if self.use_reward_critic:
+                self.reward_critic_model.eval()
             if self.cfgs.train_cfgs.actor_gradient_checkpointing and not self.lora_enabled:
                 self.actor_model.gradient_checkpointing_disable()
         return
