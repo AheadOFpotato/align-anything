@@ -1,0 +1,4 @@
+gymnasium
+gym
+gym-notices
+matplotlib

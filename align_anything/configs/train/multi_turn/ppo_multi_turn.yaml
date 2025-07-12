@@ -154,11 +154,11 @@ agent_proxy:
 es_manager:
   format_penalty: -0.1
   train:
-    env_groups: 8
-    group_size: 16
+    env_groups: 1
+    group_size: 1
     env_configs:
       tags: ["SimpleSokoban"]
-      n_groups: [8]
+      n_groups: [1]
   val:
     env_groups: 256
     group_size: 1
