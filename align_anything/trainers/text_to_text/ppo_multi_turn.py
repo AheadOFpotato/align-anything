@@ -170,6 +170,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             self.reward_tokenizer = self.tokenizer
         # loading reward critic model (optional for multi-turn)
         self.use_reward_critic = not self.multi_turn or getattr(self.cfgs.model_cfgs, 'use_reward_critic', False)
+        self.use_reward_critic = True # fixme
         if self.use_reward_critic:
             self.reward_critic_model, self.reward_critic_tokenizer, _ = load_pretrained_models(
                 self.cfgs.model_cfgs.reward_critic_model_name_or_path,
@@ -279,7 +280,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                     # Try to load from various possible file formats
                     import json
                     prompts = []
-                    for file_ext in ['.json', '.jsonl', '.txt']:
+                    for file_ext in ['.json', '.jsonl', '.txt']: # fixme: no use
                         file_path = os.path.join(data_path, f'prompts{file_ext}')
                         if os.path.exists(file_path):
                             if file_ext == '.json':
@@ -300,7 +301,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                     if not prompts:
                         # Fallback: create default prompts for environment interaction
                         prompts = [
-                            "Let's solve this step by step.",
+                            "Let's solve this step by step. gogogo.",
                             "What should I do next?",
                             "Please help me with this task.",
                             "I need to complete this objective."
@@ -309,7 +310,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                 else:
                     # Default prompts if data path doesn't exist
                     return [
-                        "Let's solve this step by step.",
+                        "Let's solve this step by step. gogogo.",
                         "What should I do next?", 
                         "Please help me with this task.",
                         "I need to complete this objective."
@@ -322,10 +323,11 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                 prompt = self.prompts[idx % len(self.prompts)]
                 
                 # Tokenize the prompt
+                # fixme: reconsider padding
                 tokenized = self.tokenizer(
                     prompt,
                     max_length=self.max_length,
-                    padding='max_length',
+                    padding='longest',
                     truncation=True,
                     return_tensors='pt'
                 )
@@ -449,20 +451,20 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
         if is_main_process():
             final_sequences = rollouts.batch['input_ids']
             for i in range(batch_size):
-                print(f"\n--- Conversation {i+1} Final Result ---")
+                self.logger.print(f"\n--- Conversation {i+1} Final Result ---")
                 full_conversation = self.tokenizer.decode(final_sequences[i], skip_special_tokens=True)
-                print(f"Full Conversation: {full_conversation}")
+                self.logger.print(f"Full Conversation: {full_conversation}\n-------------\n\n")
                 
                 # Try to extract individual turns if possible
                 turns = self.extract_conversation_turns(full_conversation)
-                for turn_idx, turn in enumerate(turns):
-                    print(f"  Turn {turn_idx + 1}: {turn}")
-                    
+                # for turn_idx, turn in enumerate(turns):
+                #     self.logger.print(f"  Turn {turn_idx + 1}: {turn}")
+
                 # Print rewards if available
-                if 'token_level_rewards' in rollouts.batch:
-                    rewards = rollouts.batch['token_level_rewards'][i]
+                if 'rm_scores' in rollouts.batch:
+                    rewards = rollouts.batch['rm_scores'][i]
                     total_reward = rewards.sum().item()
-                    print(f"  Total Reward: {total_reward:.4f}")
+                    self.logger.print(f"  Total Reward: {total_reward:.4f}")
                     
             print("="*80)
         
@@ -729,7 +731,8 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             response_mask = training_batch['response_mask']
             loss_mask = training_batch.get('loss_mask', response_mask)
         else:
-            response_mask = sequence_mask[:, start:]
+            response_mask = sequence_mask[:, :] # fixme
+            # response_mask = sequence_mask[:, start:]
             loss_mask = response_mask
 
         with torch.no_grad():
@@ -840,8 +843,9 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             reward = reward.mean()
             reward_advantage = masked_mean(reward_advantages, mask)
             reward_return = masked_mean(reward_returns, mask)
-            reward_value = masked_mean(reward_values[:, start:], mask)
-
+            #reward_value = masked_mean(reward_values[:, start:], mask)
+            reward_value = masked_mean(reward_values[:, :], mask) # fixme
+            
             actor_loss = get_all_reduce_mean(actor_loss)
             reward_critic_loss = get_all_reduce_mean(reward_critic_loss)
             reward = get_all_reduce_mean(reward)

@@ -154,7 +154,7 @@ class LLMAgentProxy:
 				break
 		rollout_states = es_manager.get_rollout_states() 
 		rollouts = ctx_manager.formulate_rollouts(rollout_states)
-		# self.tokenizer.batch_decode(rollouts.batch['input_ids'], skip_special_tokens=False) # see all the trajectories
+		# t = self.tokenizer.batch_decode(rollouts.batch['input_ids'], skip_special_tokens=False) # see all the trajectories
 		return rollouts
 
 @hydra.main(version_base=None, config_path="../../config", config_name="base")

@@ -52,7 +52,7 @@ def compute_bi_level_gae_advantage_return(
         
         for b in range(batch_size):
             # First, calculate high level advantage and return for eos token of each turn using high level gamma
-            eos_positions=reward_mask[b].nonzero(as_tuple=True)[0]
+            eos_positions=reward_mask[b].nonzero(as_tuple=True)[0] # fixme: zero reward may lead to no eos token
             lastgaelam = 0.0
             for i in range(len(eos_positions) - 1, -1, -1):
                 curr_pos = eos_positions[i]

@@ -145,7 +145,7 @@ class ContextManager:
         self.env_config_lookup = env_config_lookup
 
     def _parse_response(self, response: str) -> List:
-        response = response.replace("</thought>", "</think>")
+        # response = response.replace("</thought>", "</think>")
         pattern = r'<think>(.*?)</think>\s*<answer>(.*?)</answer>' if self.config.agent_proxy.enable_think else r'<answer>(.*?)</answer>'
         match = re.search(pattern, response, re.DOTALL)
         if not match:
@@ -299,6 +299,7 @@ class ContextManager:
             llm_inputs.batch["loss_mask"] = loss_mask # remove the first token
             llm_inputs.batch["rm_scores"] = normalized_score_tensor # remove the first token
             llm_inputs.batch["original_rm_scores"] = score_tensor # remove the first token
+            llm_inputs.batch["response_mask"] = response_mask # remove the first token
         llm_inputs.non_tensor_batch = {
             "env_ids": np.array([env_output["env_id"] for env_output in env_outputs], dtype=object),
             "group_ids": np.array([env_output["group_id"] for env_output in env_outputs], dtype=object),
