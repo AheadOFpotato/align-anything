@@ -101,6 +101,8 @@ class PromptOnlyDataset(Dataset):
             )
         self.template = template
         self.raw_data = remove_duplicate_prompts(raw_data_duplicated, self.template)
+        # print(self.raw_data[0])
+        # exit(0)
 
         if size:
             self.raw_data = self.raw_data[:size]
@@ -110,9 +112,12 @@ class PromptOnlyDataset(Dataset):
         raw_text, _ = self.template.format_prompt_only_sample(
             raw_sample, apply_chat_template=self.apply_chat_template
         )
-        if raw_text[-1] != self.tokenizer.eos_token:
-            raw_text += self.tokenizer.eos_token
+
+        # if raw_text.endswith(self.tokenizer.eos_token):
+        #     raw_text = raw_text[:-len(self.tokenizer.eos_token)]
+        
         return_dict['input_ids'] = self.tokenize(raw_text)
+        return_dict['meta_info'] = raw_sample  # Include original raw sample for reward computation
 
         return return_dict
 
@@ -172,4 +177,7 @@ class PromptOnlyCollator:
         return_dict['attention_mask'] = left_padding(attention_mask, padding_value=0).to(
             current_device
         )
+        # Include meta_info if present
+        if 'meta_info' in samples[0]:
+            return_dict['meta_info'] = [sample['meta_info'] for sample in samples]
         return return_dict

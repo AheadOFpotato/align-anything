@@ -21,9 +21,9 @@ train_cfgs:
   # Whether to load the model from checkpoint
   load_checkpoint: False
   # The deepspeed configuration
-  ds_cfgs: ds_z3_config.json
+  ds_cfgs: ds_z2_config.json
   # Number of training epochs
-  epochs: 3
+  epochs: 100
   # Seed for random number generator
   seed: 42
   # Batch size per device for training
@@ -37,11 +37,11 @@ train_cfgs:
   # Whether to use gradient checkpointing for the actor model
   actor_gradient_checkpointing: True
   # Initial learning rate for the actor model
-  actor_lr: 1.e-5
+  actor_lr: 1.e-6
   # Type of learning rate scheduler for the actor model
   actor_lr_scheduler_type: cosine
   # Ratio of warmup steps for learning rate for the actor model
-  actor_lr_warmup_ratio: 0.03
+  actor_lr_warmup_ratio: 0.0
   # Weight decay coefficient for the actor model
   actor_weight_decay: 0.01
   # Initial learning rate for the critic model
@@ -61,13 +61,13 @@ train_cfgs:
   # The strategy of evaluation, choosing form [epoch, steps]
   eval_strategy: epoch
   # The evaluation interval in step-wise evaluation case
-  eval_interval: 10
+  eval_interval: 1
   # Whether to normalize the reward during RL training.
   normalize_reward: False
   # The number of repeated updates on a generated batch.
   update_iters: 1
   # The number of groups for GRPO training
-  num_generations: 10
+  num_generations: 8
   # The hyper-parameter beta for GRPO training
   beta: 0.01
 # The data configurations
@@ -130,6 +130,8 @@ logger_cfgs:
   save_total_limit: 1
 # The model configurations
 model_cfgs:
+
+  enable_reward_model: True
   # Pretrained model name or path for the actor model in RLHF
   actor_model_name_or_path: null
   # Pretrained model name or path for the reward model in RLHF

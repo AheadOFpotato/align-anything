@@ -46,6 +46,7 @@ from align_anything.utils.tools import (
     seed_everything,
     update_dict,
 )
+from align_anything.utils.reward_score import _default_compute_score
 
 
 class GRPOTrainer(RLTrainerBase):
@@ -111,15 +112,18 @@ class GRPOTrainer(RLTrainerBase):
             lora_cfgs=self.lora_cfgs,
             processor_kwargs=self.cfgs.train_cfgs.processor_kwargs,
         )
-
-        self.reward_model, self.reward_tokenizer, _ = load_pretrained_models(
-            self.cfgs.model_cfgs.reward_model_name_or_path,
-            model_max_length=self.cfgs.model_cfgs.model_max_length,
-            padding_side='right',
-            trust_remote_code=self.cfgs.model_cfgs.trust_remote_code,
-            is_reward_model=True,
-            processor_kwargs=self.cfgs.train_cfgs.processor_kwargs,
-        )
+        if self.cfgs.model_cfgs.enable_reward_model:
+            self.reward_model, self.reward_tokenizer, _ = load_pretrained_models(
+                self.cfgs.model_cfgs.reward_model_name_or_path,
+                model_max_length=self.cfgs.model_cfgs.model_max_length,
+                padding_side='right',
+                trust_remote_code=self.cfgs.model_cfgs.trust_remote_code,
+                is_reward_model=True,
+                processor_kwargs=self.cfgs.train_cfgs.processor_kwargs,
+            )
+        else:
+            self.reward_function = _default_compute_score
+            self.reward_tokenizer = None
 
         self.generation_config = GenerationConfig(
             max_length=self.cfgs.model_cfgs.model_max_length,
@@ -183,11 +187,13 @@ class GRPOTrainer(RLTrainerBase):
             ds_cfgs=self.ds_eval_cfgs,
         )
         self.actor_reference_model.eval()
-        self.reward_model = self._init_eval_deepspeed_engine(
-            model=self.reward_model,
-            ds_cfgs=self.ds_eval_cfgs,
-        )
-        self.reward_model.eval()
+        
+        if self.cfgs.model_cfgs.enable_reward_model:
+            self.reward_model = self._init_eval_deepspeed_engine(
+                model=self.reward_model,
+                ds_cfgs=self.ds_eval_cfgs,
+            )
+            self.reward_model.eval()
 
         # load the checkpoint if specified
         if self.cfgs.train_cfgs.load_checkpoint:
@@ -200,6 +206,7 @@ class GRPOTrainer(RLTrainerBase):
         """
         Compute the log-probabilities of the model on the specified tokens.
         """
+        self.logger.print(f"shape of input_ids: {input_ids.shape}, attention_mask: {attention_mask.shape}, logits_to_keep: {logits_to_keep}")
         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits  # shape: (B, L, V)
         logits = logits[:, :-1, :]  # (B, L-1, V)
@@ -209,28 +216,48 @@ class GRPOTrainer(RLTrainerBase):
         per_token_logps = log_probs.gather(dim=-1, index=target_ids.unsqueeze(-1)).squeeze(-1)
         return per_token_logps  # shape: (B, logits_to_keep)
 
-    def generate_completions(self, prompt_batch: dict) -> torch.Tensor:
+    def generate_completions(self, prompt_batch_tensors: dict) -> torch.Tensor:
         """
         Generate multiple completions based on the given prompt.
         Here, we set num_return_sequences = self.num_generations, which requires that each sample in the dataloader contains only one prompt,
         and then generate multiple completions for comparison within the group.
         """
+        # Debug: Print input prompts
+        import random
+        tt = random.randint(0, 1000000)
+        # print("\n" + "="*50 + f" DEBUG: INPUT PROMPTS {tt} " + "="*50)
+        for i in range(prompt_batch_tensors['input_ids'].size(0)):
+            prompt_text = self.tokenizer.decode(prompt_batch_tensors['input_ids'][i], skip_special_tokens=False)
+            # print(f"Prompt {i}:")
+            # print(f"  Text: {prompt_text}")
+            # print(f"  Length: {len(prompt_batch_tensors['input_ids'][i])} tokens")
+            # print("-" * 100)
+        # self.logger.print(f"Number of prompts: {prompt_batch_tensors['input_ids'].size(0)} {self.cfgs.train_cfgs.num_generations} generations each")
         self.actor_model.eval()
+        self.logger.print(f"generating completions... shape: {prompt_batch_tensors['input_ids'].shape}")
         with torch.no_grad():
             sequences = self.actor_model.module.generate(
-                **prompt_batch,
+                **prompt_batch_tensors,
                 generation_config=self.generation_config,
                 num_return_sequences=self.cfgs.train_cfgs.num_generations,
                 synced_gpus=True,
                 do_sample=True,
             )
+        self.logger.print(f"Generated sequences shape: {sequences.shape}")
+        # check the shape of the generated sequences
+        B, L_total = sequences.size()  # shape: (B * num_generations, L_total)
+        # self.logger.print(f"Generated sequences shape: {sequences.shape}, Total Length: {L_total} tokens")
+        # print(sequences.device, "*****************\n\n\n\n")
+        self.logger.print(f"{sequences.device}")
         return sequences  # shape: (B * num_generations, L_total)
 
-    def compute_rewards(self, sequences: torch.Tensor, prompt_length: int) -> torch.Tensor:
+    def compute_rewards(self, sequences: torch.Tensor, prompt_length: int, meta_info: list | None = None) -> torch.Tensor:
         """
         Compute the rewards for the generated completions.
         """
         completions = sequences[:, prompt_length:]
+        # self.logger.print(f"{sequences.device}")
+        # print(sequences.device, "#################\n\n\n\n")
         # generate mask: for each sequence, set the tokens after the first eos token to 0
         eos_token_id = self.tokenizer.eos_token_id
         completion_mask = torch.ones_like(completions)
@@ -240,42 +267,127 @@ class GRPOTrainer(RLTrainerBase):
                 first_eos = eos_positions[0].item()
                 completion_mask[i, first_eos + 1 :] = 0
         completions_ids = completions * completion_mask
-        reward_tokenize_output = batch_retokenize(
-            completions_ids,
-            src_tokenizer=self.tokenizer,
-            dest_tokenizer=self.reward_tokenizer,
-            skip_special_tokens=True,
-            device=self.reward_model.device,
-        )
-        reward_inputs = {k: v.to(sequences.device) for k, v in reward_tokenize_output.items()}
-        with torch.no_grad():
-            rewards = self.reward_model(**reward_inputs).end_scores.squeeze(
-                dim=-1
-            )  # shape: (B*num_generations,
+        
+        if self.cfgs.model_cfgs.enable_reward_model:
+            reward_tokenize_output = batch_retokenize(
+                completions_ids,
+                src_tokenizer=self.tokenizer,
+                dest_tokenizer=self.reward_tokenizer,
+                skip_special_tokens=True,
+                device=self.reward_model.device,
+            )
+            reward_inputs = {k: v.to(sequences.device) for k, v in reward_tokenize_output.items()}
+            with torch.no_grad():
+                rewards = self.reward_model(**reward_inputs).end_scores.squeeze(
+                    dim=-1
+                )  # shape: (B*num_generations,)
+        else:
+            if meta_info is None:
+                raise ValueError("meta_info is required when not using reward model")
+            
+            # print("\n" + "="*50 + " DEBUG: GENERATED RESPONSES " + "="*50)
+            
+            completion_texts = []
+            for i in range(completions_ids.size(0)):
+                completion_text = self.tokenizer.decode(completions_ids[i], skip_special_tokens=True)
+                completion_texts.append(completion_text)
+                
+                # Debug: Print each generated response
+                sample_idx = i // self.num_generations
+                generation_idx = i % self.num_generations
+                # print(f"Sample {sample_idx}, Generation {generation_idx}:")
+                # print(f"  Response: {completion_text}")
+                # print(f"  Length: {len(completions_ids[i])} tokens")
+                # print("-" * 100)
+            
+            rewards = []
+            batch_size = len(meta_info)  # Original batch size
+            
+            # print("\n" + "="*50 + " DEBUG: REWARD COMPUTATION " + "="*50)
+            
+            for i, completion_text in enumerate(completion_texts):
+                # Map completion index to original sample index (account for num_generations)
+                sample_idx = i // self.num_generations
+                sample_meta = meta_info[sample_idx]
+                
+                # Extract data_source and ground_truth from meta_info
+                data_source = sample_meta.get('data_source', '')
+                reward_model_info = sample_meta.get('reward_model', {})
+                ground_truth = reward_model_info.get('ground_truth', '')
+                extra_info = sample_meta.get('extra_info', {})
+                
+                
+
+                try:
+                    score = self.reward_function(data_source, completion_text, ground_truth, extra_info)
+                    rewards.append(float(score))
+                    self.logger.print(f"Sample {sample_idx}, Generation {i % self.num_generations}:   Ground Truth: {ground_truth}, Score: {score}")
+                except Exception as e:
+                    # If reward computation fails, assign a default low score
+                    self.logger.print(f"Warning: Reward computation failed for sample {sample_idx}: {e}")
+                    rewards.append(0.0)
+                    self.logger.print(f"  Score: 0.0 (ERROR: {e})")
+
+                self.logger.print("-" * 100)
+
+            rewards = torch.tensor(rewards, dtype=torch.float32, device=sequences.device)
+        
         return rewards
 
     def train_step(self, prompt_batch: dict) -> dict[str, float]:
         """Single training step"""
         device = self.actor_model.module.parameters().__next__().device
-        prompt_batch = {k: v.to(device) for k, v in prompt_batch.items()}
+        
+        # Extract meta_info before moving to device
+        meta_info = prompt_batch.get('meta_info', None)
+        
+        # Debug: Print meta_info
+        # print("\n" + "="*50 + " DEBUG: META INFO " + "="*50)
+        if meta_info:
+            for i, meta in enumerate(meta_info):
+                # print(f"Sample {i} Meta Info:")
+                # print(f"  Data Source: {meta.get('data_source', 'N/A')}")
+                # print(f"  Ground Truth: {meta.get('reward_model', {}).get('ground_truth', 'N/A')}")
+                prompt_text = meta.get('prompt', 'N/A')
+                if len(prompt_text) > 200:
+                    prompt_text = prompt_text[:200] + "..."
+                # print(f"  Prompt: {prompt_text}")
+                # print("-" * 100)
+        
+        # Remove meta_info from prompt_batch and move tensors to device
+        prompt_batch_tensors = {k: v.to(device) for k, v in prompt_batch.items() if k != 'meta_info'}
 
         # record the original prompt length
-        prompt_length = prompt_batch['input_ids'].size(1)
+        prompt_length = prompt_batch_tensors['input_ids'].size(1)
 
         # generate multiple completions (each prompt generates num_generations sequences)
-        sequences = self.generate_completions(prompt_batch)  # shape: (B * num_generations, L_total)
+        sequences = self.generate_completions(prompt_batch_tensors)  # shape: (B * num_generations, L_total)
         # restore train mode
         self.actor_model.train()
 
         # compute rewards
-        rewards = self.compute_rewards(sequences, prompt_length)  # shape: (B * num_generations,)
-        B = prompt_batch['input_ids'].size(0)
+        rewards = self.compute_rewards(sequences, prompt_length, meta_info)  # shape: (B * num_generations,)
+        
+        # Debug: Print reward statistics
+        self.logger.print("\n" + "="*50 + " DEBUG: REWARD STATISTICS " + "="*50)
+        B = prompt_batch_tensors['input_ids'].size(0)
         G = self.num_generations
-        rewards = rewards.view(B, G)
-        group_mean = rewards.mean(dim=1, keepdim=True)
-        group_std = rewards.std(dim=1, keepdim=True) + 1e-4
-        advantages = (rewards - group_mean) / group_std  # shape: (B, G)
+        rewards_reshaped = rewards.view(B, G)
+        for i in range(B):
+            sample_rewards = rewards_reshaped[i]
+            self.logger.print(f"Sample {i} Rewards: {sample_rewards.tolist()}  Mean: {sample_rewards.mean().item():.4f}  Std: {sample_rewards.std().item():.4f}")
+            # self.logger.print(f"")
+            # self.logger.print(f"")
+            # self.logger.print("-" * 100)
+
+        group_mean = rewards_reshaped.mean(dim=1, keepdim=True)
+        group_std = rewards_reshaped.std(dim=1, keepdim=True) + 1e-4
+        
+        advantages = (rewards_reshaped - group_mean) / group_std  # shape: (B, G)
+        self.logger.print(f"Advantages shape: {advantages.shape}")
         advantages = advantages.view(-1, 1)
+        self.logger.print(f"advantage values: {advantages.tolist()}")
+        self.logger.print(f"Advantages shape: {advantages.shape}, Mean: {advantages.mean().item():.4f}, Std: {advantages.std().item():.4f}")
 
         # compute the attention mask of the generated sequences
         attention_mask = (sequences != self.tokenizer.pad_token_id).long()
@@ -302,6 +414,7 @@ class GRPOTrainer(RLTrainerBase):
         advantages_expanded = advantages.expand(-1, logits_to_keep)
 
         # formula: loss = - ( exp(logp - detach(logp)) * advantage - beta * KL )
+        self.logger.print(f"{per_token_logps - per_token_logps.detach()} {per_token_logps - ref_per_token_logps}")
         per_token_loss = torch.exp(per_token_logps - per_token_logps.detach()) * advantages_expanded
         per_token_loss = -(per_token_loss - self.beta * per_token_kl)
 
@@ -321,12 +434,43 @@ class GRPOTrainer(RLTrainerBase):
 
         self.actor_model.zero_grad()
         self.actor_model.backward(loss)
+        
+        # Compute gradient norm before optimizer step
+        total_grad_norm = 0.0
+        num_params = 0
+        for param in self.actor_model.module.parameters():
+            if param.grad is not None:
+                param_grad_norm = param.grad.data.norm(2).item()
+                total_grad_norm += param_grad_norm ** 2
+                num_params += 1
+        total_grad_norm = total_grad_norm ** 0.5
+        avg_grad_norm = total_grad_norm / max(num_params, 1)
+        self.logger.print(f"Total Gradient Norm: {total_grad_norm:.4f}, Average Gradient Norm: {avg_grad_norm:.4f}, Number: {num_params}")
+        
         self.actor_model.step()
 
         loss_val = get_all_reduce_mean(loss).item()
-        avg_reward = get_all_reduce_mean(rewards.mean()).item()
+        avg_reward = get_all_reduce_mean(rewards_reshaped.mean()).item()
+        grad_norm = get_all_reduce_mean(torch.tensor(total_grad_norm, device=device)).item()
+        avg_grad_norm_val = get_all_reduce_mean(torch.tensor(avg_grad_norm, device=device)).item()
 
-        return {'train/loss': loss_val, 'train/reward': avg_reward}
+        # Debug: Print training step summary
+        # print("\n" + "="*50 + " DEBUG: TRAINING STEP SUMMARY " + "="*50)
+        # print(f"Loss: {loss_val:.6f}")
+        # print(f"Average Reward: {avg_reward:.4f}")
+        # print(f"Prompt Length: {prompt_length} tokens")
+        # print(f"Generated Sequences Shape: {sequences.shape}")
+        # print("="*120)
+
+        return {
+            'train/loss': loss_val, 
+            'train/reward': avg_reward,
+            'train/kl': get_all_reduce_mean(per_token_kl.mean()).item(),
+            'train/num_gen_tokens': sequences.size(1) - prompt_length,
+            'train/grad_norm': grad_norm,
+            'train/avg_grad_norm': avg_grad_norm_val,
+            'train/actor_lr': self.actor_model.optimizer.param_groups[0]['lr'],
+        }
 
     def train(self) -> None:
         """Training main loop"""
@@ -403,6 +547,7 @@ def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     _, unparsed_args = parser.parse_known_args()
     keys = [k[2:] for k in unparsed_args[1::2]]
+    # print(keys, '\n\n')
     values = list(unparsed_args[2::2])
     unparsed_args = dict(zip(keys, values))
     for k, v in unparsed_args.items():
@@ -410,6 +555,9 @@ def main():
 
     cfgs = dict_to_namedtuple(dict_cfgs)
     seed_everything(cfgs.train_cfgs.seed)
+    
+    # print(cfgs)
+    # exit(0)
 
     # initialize and start training the GRPO model
     trainer = GRPOTrainer(cfgs=cfgs, ds_cfgs=ds_cfgs)
