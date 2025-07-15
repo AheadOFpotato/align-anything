@@ -141,7 +141,7 @@ trainer:
 # Agent Proxy configuration (aligned with RAGEN)
 agent_proxy:
   max_context_window: -1
-  max_turn: 1
+  max_turn: 5
   action_sep: "||"
   max_actions_per_turn: 5
   use_turn_scores: false
@@ -157,13 +157,13 @@ es_manager:
     env_groups: 8
     group_size: 16
     env_configs:
-      tags: ["BanditTest"]
+      tags: ["SimpleSokoban"]
       n_groups: [8]
   val:
     env_groups: 256
-    group_size: 4
+    group_size: 1
     env_configs:
-      tags: ["BanditTest"]
+      tags: ["SimpleSokoban"]
       n_groups: [256]
 
 # Context Manager configuration (aligned with RAGEN)

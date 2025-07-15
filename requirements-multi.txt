@@ -2,3 +2,8 @@ gymnasium
 gym
 gym-notices
 matplotlib
+gym_sokoban
+hydra-core
+tensordict
+anthropic
+together

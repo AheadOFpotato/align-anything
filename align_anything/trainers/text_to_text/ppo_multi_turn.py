@@ -29,6 +29,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
+import numpy as np
 from tqdm import tqdm
 from transformers import GenerationConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
@@ -231,7 +232,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
     def init_datasets(self) -> None:
         """Initialize training and evaluation datasets."""
         # For multi-turn mode with RAGEN data, use special data loading
-        if self.multi_turn and self.is_ragen_data():
+        if self.multi_turn:
             self.init_ragen_datasets()
         else:
             # Standard data loading
@@ -239,149 +240,62 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                 self.get_dataloaders(PromptOnlyDataset, PromptOnlyDataset, SupervisedDataset)
             )
 
-    def is_ragen_data(self) -> bool:
-        """Check if using RAGEN data path."""
-        train_datasets = self.cfgs.data_cfgs.train_datasets
-        if isinstance(train_datasets, list):
-            return any("ragen_utils/data" in dataset for dataset in train_datasets)
-        elif isinstance(train_datasets, str):
-            return "ragen_utils/data" in train_datasets
-        return False
+    # def is_ragen_data(self) -> bool:
+    #     """Check if using RAGEN data path."""
+    #     train_datasets = self.cfgs.data_cfgs.train_datasets
+    #     if isinstance(train_datasets, list):
+    #         return any("ragen_utils/data" in dataset for dataset in train_datasets)
+    #     elif isinstance(train_datasets, str):
+    #         return "ragen_utils/data" in train_datasets
+    #     return False
 
     def init_ragen_datasets(self) -> None:
-        """Initialize datasets for RAGEN data format."""
-        # Import RAGEN data loader if available
-        from align_anything.utils.ragen_utils.data import load_ragen_data
-        
-        # Load RAGEN format data
-        train_data_path = os.path.join(
-            os.path.dirname(__file__), 
-            "..", "..", "utils", "ragen_utils", "data", "train"
-        )
-        eval_data_path = os.path.join(
-            os.path.dirname(__file__), 
-            "..", "..", "utils", "ragen_utils", "data", "val"
-        )
-        
-        # Create simplified dataloaders for RAGEN data
-        # In multi-turn mode, the actual data comes from environment interaction
-        # These are just placeholder dataloaders for prompts
-        
-        class RAGENPromptDataset(Dataset):
-            def __init__(self, data_path, tokenizer, max_length=2048):
-                self.tokenizer = tokenizer
-                self.max_length = max_length
-                # Load simple prompts for environment initialization
-                self.prompts = self.load_prompts(data_path)
-            
-            def load_prompts(self, data_path):
-                """Load prompts from RAGEN data directory."""
-                if os.path.exists(data_path):
-                    # Try to load from various possible file formats
-                    import json
-                    prompts = []
-                    for file_ext in ['.json', '.jsonl', '.txt']: # fixme: no use
-                        file_path = os.path.join(data_path, f'prompts{file_ext}')
-                        if os.path.exists(file_path):
-                            if file_ext == '.json':
-                                with open(file_path, 'r') as f:
-                                    data = json.load(f)
-                                    if isinstance(data, list):
-                                        prompts.extend([item.get('prompt', str(item)) for item in data])
-                            elif file_ext == '.jsonl':
-                                with open(file_path, 'r') as f:
-                                    for line in f:
-                                        item = json.loads(line.strip())
-                                        prompts.append(item.get('prompt', str(item)))
-                            elif file_ext == '.txt':
-                                with open(file_path, 'r') as f:
-                                    prompts.extend([line.strip() for line in f if line.strip()])
-                            break
-                    
-                    if not prompts:
-                        # Fallback: create default prompts for environment interaction
-                        prompts = [
-                            "Let's solve this step by step. gogogo.",
-                            "What should I do next?",
-                            "Please help me with this task.",
-                            "I need to complete this objective."
-                        ]
-                    return prompts
-                else:
-                    # Default prompts if data path doesn't exist
-                    return [
-                        "Let's solve this step by step. gogogo.",
-                        "What should I do next?", 
-                        "Please help me with this task.",
-                        "I need to complete this objective."
-                    ]
-            
-            def __len__(self):
-                return len(self.prompts)
-            
-            def __getitem__(self, idx):
-                prompt = self.prompts[idx % len(self.prompts)]
-                
-                # Tokenize the prompt
-                # fixme: reconsider padding
-                tokenized = self.tokenizer(
-                    prompt,
-                    max_length=self.max_length,
-                    padding='longest',
-                    truncation=True,
-                    return_tensors='pt'
-                )
-                
-                return {
-                    'input_ids': tokenized['input_ids'].squeeze(0),
-                    'attention_mask': tokenized['attention_mask'].squeeze(0),
-                }
-            
-            def get_collator(self):
-                """Return a simple collator for batching."""
-                def collate_fn(batch):
-                    input_ids = torch.stack([item['input_ids'] for item in batch])
-                    attention_mask = torch.stack([item['attention_mask'] for item in batch])
-                    return {
-                        'input_ids': input_ids,
-                        'attention_mask': attention_mask,
-                    }
-                return collate_fn
-        
-        # Create datasets
-        train_dataset = RAGENPromptDataset(train_data_path, self.tokenizer)
-        eval_dataset = RAGENPromptDataset(eval_data_path, self.tokenizer)
-        
-        # Create dataloaders
-        
-        self.prompt_only_dataloader = DataLoader(
-            train_dataset,
-            collate_fn=train_dataset.get_collator(),
-            sampler=DistributedSampler(train_dataset, shuffle=True),
-            batch_size=int(self.cfgs.train_cfgs.per_device_prompt_batch_size),
-        )
-        
-        self.eval_dataloader = DataLoader(
-            eval_dataset,
-            collate_fn=eval_dataset.get_collator(),
-            sampler=DistributedSampler(eval_dataset, shuffle=False),
-            batch_size=int(self.cfgs.train_cfgs.per_device_train_batch_size),
-        ) if self.cfgs.data_cfgs.eval_datasets else None
-        
-        # PTX dataloader (not used in multi-turn mode typically)
-        self.ptx_dataloader = DataLoader(
-            train_dataset,  # Reuse train dataset
-            collate_fn=train_dataset.get_collator(),
-            sampler=DistributedSampler(train_dataset, shuffle=True),
-            batch_size=int(self.cfgs.train_cfgs.per_device_train_batch_size),
-        )
-        
-        self.logger.print(f"Loaded RAGEN datasets: train={len(train_dataset)}, eval={len(eval_dataset) if eval_dataset else 0}")
-            
+        self.prompt_only_dataloader = ['' for _ in range(self.cfgs.es_manager.train.env_groups * self.cfgs.es_manager.train.group_size)]
 
     def init_engines(self) -> None:
         """Initialize DeepSpeed engines."""
         self.init_deepspeed_engines()
+    
+    def _filter_rollout(self, batch):
+        """filter rollout based on in-group max - in-group mean. We want those groups to have high-quality rollouts that deviates significantly from the mean"""
+        rollout_filter_ratio = self.cfgs.actor_rollout_ref.rollout.rollout_filter_ratio
+        num_groups, group_size = self.cfgs.es_manager.train.env_groups, self.cfgs.es_manager.train.group_size
+
+        rm_scores = batch.batch["original_rm_scores"].sum(dim=-1).view(num_groups, group_size)
+        in_group_std = rm_scores.std(dim=-1)
+        in_group_max = rm_scores.max(dim=-1).values
+        in_group_mean = rm_scores.mean(dim=-1)
+        if rollout_filter_ratio == 1:
+            return batch, {"rollout/in_group_std": in_group_std.mean(), "rollout/in_group_max": in_group_max.mean(), "rollout/in_group_mean": in_group_mean.mean(), "rollout/chosen_in_group_std": in_group_std.mean(), "rollout/chosen_in_group_max": in_group_max.mean(), "rollout/chosen_in_group_mean": in_group_mean.mean()}
+
+        if self.cfgs.actor_rollout_ref.rollout.rollout_filter_type == "std_rev":
+            top_groups = (-in_group_std).topk(int(rollout_filter_ratio * num_groups)).indices
+        elif self.cfgs.actor_rollout_ref.rollout.rollout_filter_type == "std":
+            top_groups = in_group_std.topk(int(rollout_filter_ratio * num_groups)).indices
+        else:
+            raise ValueError(f"Invalid rollout filter type: {self.cfgs.actor_rollout_ref.rollout.rollout_filter_type}")
+
+        mask = torch.zeros(num_groups, dtype=torch.bool)
+        mask[top_groups] = True
+        mask = mask.unsqueeze(1).expand(-1, group_size).flatten()
+
+        batch.batch = batch.batch[mask]
+
+        for key, value in batch.non_tensor_batch.items():
+            if isinstance(value, np.ndarray):
+                batch.non_tensor_batch[key] = value[mask]
+            else:
+                batch.non_tensor_batch[key] = [v for v, m in zip(value, mask) if m]
+
+        metrics = {
+            "rollout/in_group_std": in_group_std.mean(),
+            "rollout/in_group_max": in_group_max.mean(),
+            "rollout/in_group_mean": in_group_mean.mean(),
+            "rollout/chosen_in_group_std": in_group_std[top_groups].mean(),
+            "rollout/chosen_in_group_max": in_group_max[top_groups].mean(),
+            "rollout/chosen_in_group_mean": in_group_mean[top_groups].mean()
+        }
+        return batch, metrics
 
     def split_ptx_micro_batches(
         self,
@@ -416,14 +330,14 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
         batch_size = initial_prompts.shape[0]
         
         # Print initial prompts
-        if is_main_process():
-            print("\n" + "="*80)
-            print("MULTI-TURN CONVERSATION ROLLOUT")
-            print("="*80)
-            for i in range(batch_size):
-                prompt_text = self.tokenizer.decode(initial_prompts[i], skip_special_tokens=True)
-                print(f"\n--- Conversation {i+1} ---")
-                print(f"Initial Prompt: {prompt_text}")
+        # if is_main_process():
+        #     print("\n" + "="*80)
+        #     print("MULTI-TURN CONVERSATION ROLLOUT")
+        #     print("="*80)
+        #     for i in range(batch_size):
+        #         prompt_text = self.tokenizer.decode(initial_prompts[i], skip_special_tokens=True)
+        #         print(f"\n--- Conversation {i+1} ---")
+        #         print(f"Initial Prompt: {prompt_text}")
         
         # Create DataProto from mini_prompt_only_batch
         dataproto = DataProto()
@@ -440,13 +354,14 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             'validate': False
         }
         
-        # Store conversation history for printing
-        conversation_history = [[] for _ in range(batch_size)]
         
         # Perform multi-turn rollout using the agent proxy
         # This will handle the full environment interaction loop
         rollouts = self.agent_proxy.rollout(dataproto, val=False)
-        
+        # TODO: add filter rollout
+        rollouts, metrics = self._filter_rollout(rollouts)
+        metrics.update({"train/" + key: value for key, value in rollouts.meta_info["metrics"].items()})
+
         # Print the multi-turn conversation results
         if is_main_process():
             final_sequences = rollouts.batch['input_ids']
@@ -464,7 +379,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                 if 'rm_scores' in rollouts.batch:
                     rewards = rollouts.batch['rm_scores'][i]
                     total_reward = rewards.sum().item()
-                    self.logger.print(f"  Total Reward: {total_reward:.4f}")
+                    self.logger.print(f"  Reward of this sequence: {total_reward:.4f}")
                     
             print("="*80)
         
@@ -488,7 +403,13 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             # Convert rm_scores to token_level_rewards if not already present
             if 'token_level_rewards' not in actor_batch:
                 actor_batch['token_level_rewards'] = rollouts.batch['rm_scores'].to(device)
-            
+        
+        actor_batch.update({"metrics": metrics})
+        if is_main_process():
+            print("="*50)
+            for key, value in metrics.items():
+                print(f"{key}: {value}")
+            print("="*50)
         return actor_batch
     
     def extract_conversation_turns(self, full_conversation: str) -> list[str]:
@@ -888,50 +809,52 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
         """Train the model."""
         self.logger.print('***** Running training *****')
 
-        progress_bar = tqdm(
-            total=self.total_training_steps,
-            desc=f'Training 1/{self.cfgs.train_cfgs.epochs} epoch',
-            position=0,
-            leave=True,
-            disable=not is_main_process(),
-        )
+        if self.multi_turn:
+            progress_bar = tqdm(
+                total=self.cfgs.trainer.total_training_steps,
+                desc=f'Training 1/{self.cfgs.trainer.total_training_steps} step',
+                position=0,
+                leave=True,
+                disable=not is_main_process(),
+            )
+        else:
+            progress_bar = tqdm(
+                total=self.total_training_steps,
+                desc=f'Training 1/{self.cfgs.train_cfgs.epochs} epoch',
+                position=0,
+                leave=True,
+                disable=not is_main_process(),
+            )
 
         if self.cfgs.data_cfgs.eval_datasets:
             self.logger.print('\n***** Evaluating at the beginning *****')
             self.eval()
 
         num_prompt_only_batches = len(self.prompt_only_dataloader)
-        num_ptx_batches = len(self.ptx_dataloader)
-        num_ptx_replicas = (num_prompt_only_batches + num_ptx_batches - 1) // num_ptx_batches
-        for epoch in range(int(self.cfgs.train_cfgs.epochs)):
-            for prompt_only_batch, ptx_batch in zip(
-                self.prompt_only_dataloader,
-                itertools.chain.from_iterable([self.ptx_dataloader] * num_ptx_replicas),
-            ):
+        if self.use_ptx:
+            num_ptx_batches = len(self.ptx_dataloader)
+            num_ptx_replicas = (num_prompt_only_batches + num_ptx_batches - 1) // num_ptx_batches
+        else:
+            self.ptx_dataloader = []
+            num_ptx_replicas = 1
+        
+        if self.multi_turn:
+            prompt_only_batch = {"input_ids": torch.zeros(1, 1), "attention_mask": torch.zeros(1, 1)}
+            for step in range(self.cfgs.trainer.total_training_steps):
                 inference_batches, training_batches = self.rollout(prompt_only_batch)
 
-                if self.use_ptx:
-                    ptx_batches = self.split_ptx_micro_batches(ptx_batch)
-                else:
-                    ptx_batches = [None for _ in range(len(inference_batches))]
-                torch_gc()
-
                 for _ in range(self.cfgs.train_cfgs.update_iters):
-                    for inference_batch, training_batch, ptx_batch in zip(
-                        inference_batches, training_batches, ptx_batches
+                    for inference_batch, training_batch in zip(
+                        inference_batches, training_batches
                     ):
                         rl_info = self.rl_step(inference_batch, training_batch)
 
                         torch_gc()
                         self.logger.log(rl_info, step=self.global_step)
-                        if self.use_ptx:
-                            ptx_info = self.ptx_step(ptx_batch)
-                            torch_gc()
-                            self.logger.log(ptx_info, step=self.global_step)
-
+                        
                         self.global_step += 1
                         progress_bar.set_description(
-                            f'Training {epoch + 1}/{self.cfgs.train_cfgs.epochs} epoch '
+                            f'Training {step + 1}/{self.cfgs.trainer.total_training_steps} step '
                             f'(reward {rl_info["train/reward"]:.4f})',
                         )
                         progress_bar.update(1)
@@ -955,11 +878,70 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                             )
                             self.eval()
 
-            if self.cfgs.data_cfgs.eval_datasets and self.cfgs.train_cfgs.eval_strategy == 'epoch':
-                self.logger.print(
-                    f'\n***** Evaluating at epoch {epoch + 1}/{self.cfgs.train_cfgs.epochs} *****',
-                )
-                self.eval()
+                if self.cfgs.data_cfgs.eval_datasets and self.cfgs.train_cfgs.eval_strategy == 'epoch':
+                    self.logger.print(
+                        f'\n***** Evaluating at epoch {epoch + 1}/{self.cfgs.train_cfgs.epochs} *****',
+                    )
+                    self.eval()
+        
+        else:
+            for epoch in range(int(self.cfgs.train_cfgs.epochs)):
+                for prompt_only_batch, ptx_batch in zip(
+                    self.prompt_only_dataloader,
+                    itertools.chain.from_iterable([self.ptx_dataloader] * num_ptx_replicas),
+                ):
+                    inference_batches, training_batches = self.rollout(prompt_only_batch)
+
+                    if self.use_ptx:
+                        ptx_batches = self.split_ptx_micro_batches(ptx_batch)
+                    else:
+                        ptx_batches = [None for _ in range(len(inference_batches))]
+                    torch_gc()
+
+                    for _ in range(self.cfgs.train_cfgs.update_iters):
+                        for inference_batch, training_batch, ptx_batch in zip(
+                            inference_batches, training_batches, ptx_batches
+                        ):
+                            rl_info = self.rl_step(inference_batch, training_batch)
+
+                            torch_gc()
+                            self.logger.log(rl_info, step=self.global_step)
+                            if self.use_ptx:
+                                ptx_info = self.ptx_step(ptx_batch)
+                                torch_gc()
+                                self.logger.log(ptx_info, step=self.global_step)
+
+                            self.global_step += 1
+                            progress_bar.set_description(
+                                f'Training {epoch + 1}/{self.cfgs.train_cfgs.epochs} epoch '
+                                f'(reward {rl_info["train/reward"]:.4f})',
+                            )
+                            progress_bar.update(1)
+
+                            save_interval = (
+                                self.total_update_steps // self.cfgs.logger_cfgs.save_total_limit
+                            )
+
+                            if self.global_step % save_interval == 0:
+                                self.logger.print(f'Saving checkpoint at step {self.global_step} ...')
+                                self.save(tag=self.global_step)
+                                self.logger.print('Checkpoint saved.')
+
+                            if (
+                                self.cfgs.data_cfgs.eval_datasets
+                                and self.cfgs.train_cfgs.eval_strategy == 'steps'
+                                and self.global_step % self.cfgs.train_cfgs.eval_interval == 0
+                            ):
+                                self.logger.print(
+                                    f'\n***** Evaluating at step {self.global_step} *****',
+                                )
+                                self.eval()
+
+                if self.cfgs.data_cfgs.eval_datasets and self.cfgs.train_cfgs.eval_strategy == 'epoch':
+                    self.logger.print(
+                        f'\n***** Evaluating at epoch {epoch + 1}/{self.cfgs.train_cfgs.epochs} *****',
+                    )
+                    self.eval()
 
     def get_advantages_and_returns(
         self,
@@ -1082,7 +1064,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                     response_text = self.tokenizer.decode(generated_seq, skip_special_tokens=True)
                     response_texts.append(response_text)
                 
-                # Create output DataProto
+                # Create output DataProto, here different from RAGEN
                 lm_outputs = DataProto()
                 lm_outputs.non_tensor_batch = {
                     'response_texts': response_texts,
