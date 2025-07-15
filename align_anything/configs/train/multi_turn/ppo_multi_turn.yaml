@@ -29,7 +29,7 @@ train_cfgs:
   multi_turn: true
   bi_level_gae: true
   high_level_gamma: 0.95
-  max_turn: 1
+  max_turn: 5
   
   # Explicitly disable reward and critic models in multi-turn mode
   # (Environment provides rewards directly)
@@ -141,11 +141,11 @@ trainer:
 # Agent Proxy configuration (aligned with RAGEN)
 agent_proxy:
   max_context_window: -1
-  max_turn: 5
+  max_turn: 1
   action_sep: "||"
   max_actions_per_turn: 5
   use_turn_scores: false
-  enable_think: false
+  enable_think: true
   reward_normalization:
     grouping: "state"
     method: "identity"
@@ -157,13 +157,13 @@ es_manager:
     env_groups: 8
     group_size: 16
     env_configs:
-      tags: ["SimpleSokoban"]
+      tags: ["BanditTest"]
       n_groups: [8]
   val:
     env_groups: 256
     group_size: 1
     env_configs:
-      tags: ["SimpleSokoban"]
+      tags: ["BanditTest"]
       n_groups: [256]
 
 # Context Manager configuration (aligned with RAGEN)

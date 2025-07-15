@@ -361,6 +361,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
         # TODO: add filter rollout
         rollouts, metrics = self._filter_rollout(rollouts)
         metrics.update({"train/" + key: value for key, value in rollouts.meta_info["metrics"].items()})
+        self.logger.log(metrics, step=self.global_step)
 
         # Print the multi-turn conversation results
         if is_main_process():
@@ -1124,14 +1125,15 @@ def main():
     # Set random seed
     seed_everything(cfgs.train_cfgs.seed)
     
-    print("=" * 60)
-    print("Starting Multi-turn PPO Training with RAGEN")
-    print("=" * 60)
-    print(f"Multi-turn enabled: {getattr(cfgs.train_cfgs, 'multi_turn', False)}")
-    print(f"Bi-level GAE: {getattr(cfgs.train_cfgs, 'bi_level_gae', False)}")
-    print(f"Max turns: {getattr(cfgs.train_cfgs, 'max_turn', 1)}")
-    print(f"High-level gamma: {getattr(cfgs.train_cfgs, 'high_level_gamma', 1.0)}")
-    print("=" * 60)
+    if is_main_process():
+        print("=" * 60)
+        print("Starting Multi-turn PPO Training with RAGEN")
+        print("=" * 60)
+        print(f"Multi-turn enabled: {getattr(cfgs.train_cfgs, 'multi_turn', False)}")
+        print(f"Bi-level GAE: {getattr(cfgs.train_cfgs, 'bi_level_gae', False)}")
+        print(f"Max turns: {getattr(cfgs.train_cfgs, 'max_turn', 1)}")
+        print(f"High-level gamma: {getattr(cfgs.train_cfgs, 'high_level_gamma', 1.0)}")
+        print("=" * 60)
     
     # Initialize trainer
     trainer = PPOTrainer(cfgs=cfgs, ds_cfgs=ds_cfgs)

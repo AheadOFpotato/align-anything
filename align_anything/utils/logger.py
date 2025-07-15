@@ -81,7 +81,8 @@ class Logger:
             'none',
             'wandb',
             'tensorboard',
-        }, f'log_type should be one of [tensorboard, wandb, none], but got {log_type}'
+            'swanlab'
+        }, f'log_type should be one of [tensorboard, wandb, swanlab, none], but got {log_type}'
 
         if cls._instance is None:
             self = cls._instance = super().__new__(
@@ -105,6 +106,20 @@ class Logger:
                         dir=log_dir,
                         config=config,
                         mode='offline'
+                    )
+                elif self.log_type == 'swanlab':
+                    import swanlab
+
+                    SWANLAB_API_KEY = os.environ.get("SWANLAB_API_KEY", None)
+                    SWANLAB_WORKSPACE = os.environ.get("SWANLAB_WORKSPACE", None)
+                    if SWANLAB_API_KEY:
+                        swanlab.login(SWANLAB_API_KEY)  # NOTE: previous login information will be overwritten
+                    self.wandb = swanlab.init(
+                        project=log_project,
+                        workspace=SWANLAB_WORKSPACE,
+                        name=log_run_name,
+                        dir=log_dir,
+                        config=config,
                     )
 
                 if log_dir is not None:
@@ -135,7 +150,7 @@ class Logger:
         if self.log_type == 'tensorboard':
             for key, value in metrics.items():
                 self.writer.add_scalar(key, value, global_step=step)
-        elif self.log_type == 'wandb':
+        elif self.log_type == 'wandb' or self.log_type == 'swanlab':
             self.wandb.log(metrics, step=step)
 
     @rank_zero_only

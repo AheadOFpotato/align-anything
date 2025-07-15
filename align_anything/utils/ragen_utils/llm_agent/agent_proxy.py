@@ -1,6 +1,6 @@
 from .ctx_manager import ContextManager
 from .es_manager import EnvStateManager
-from vllm import LLM, SamplingParams
+# from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import hydra
 import os

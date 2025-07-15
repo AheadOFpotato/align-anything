@@ -16,7 +16,7 @@
 # The training configurations
 train_cfgs:
   # The deepspeed configuration
-  ds_cfgs: ds_z3_config.json
+  ds_cfgs: ds_z2_config.json
   # Number of training epochs
   epochs: 30
   # Seed for random number generator
@@ -34,7 +34,7 @@ train_cfgs:
   # Whether to use gradient checkpointing for the critic model
   critic_gradient_checkpointing: True
   # Initial learning rate for the actor model
-  actor_lr: 1.e-5
+  actor_lr: 1.e-6
   # Type of learning rate scheduler for the actor model
   actor_lr_scheduler_type: cosine
   # Ratio of warmup steps for learning rate for the actor model
@@ -42,7 +42,7 @@ train_cfgs:
   # Weight decay coefficient for the actor model
   actor_weight_decay: 0.01
   # Initial learning rate for the critic model
-  critic_lr: 5.e-6
+  critic_lr: 9.e-6
   # Type of learning rate scheduler for the critic model
   critic_lr_scheduler_type: constant
   # Ratio of warmup steps for learning rate for the critic model
@@ -124,9 +124,9 @@ data_cfgs:
 # The logging configurations
 logger_cfgs:
   # Type of logging to use, choosing from [wandb, tensorboard]
-  log_type: wandb
+  log_type: swanlab
   # Project name for logging
-  log_project: align-anything
+  log_project: multi-turn-bandit
   # Run name for logging
   log_run_name: ppo
   # Output directory name
