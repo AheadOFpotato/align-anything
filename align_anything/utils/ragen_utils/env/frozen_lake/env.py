@@ -42,8 +42,10 @@ class FrozenLakeEnv(BaseDiscreteActionEnv, GymFrozenLakeEnv):
         _, reward, done, _, _ = GymFrozenLakeEnv.step(self, self.action_map[action])
         next_obs = self.render()
         info = {"action_is_effective": prev_pos != int(self.s), "action_is_valid": True, "success": self.desc[self.player_pos] == b"G"}
-
-        return next_obs, reward, done, info
+        # print("\n\n\n\n\n\n\n\n=========\n\n\n\n\n\n")
+        
+        # exit(0)
+        return next_obs, reward+0.0000001, done, info # not elegant
      
     def render(self):
         if self.render_mode == 'text':

@@ -59,7 +59,7 @@ class CountdownEnv(BaseLanguageBasedEnv, gym.Env):
         reward = self.compute_reward(action, self.data[self.index])
         next_obs, done, info = f"Your answer get {reward} points.", True, {"action_is_effective": reward > 0, "action_is_valid": True, "success": reward == self.config.score}
         self.render_cache = next_obs
-        return next_obs, reward, done, info
+        return next_obs, reward+0.0000001, done, info
     
     def render(self):
         return self.render_cache
