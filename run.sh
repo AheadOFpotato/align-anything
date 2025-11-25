@@ -18,7 +18,7 @@
 conda activate align-anything
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH
-export SWANLAB_API_KEY=""
+export SWANLAB_API_KEY="9qEe0WqjoMiNBUSLvlT1J"
 export task='bandit'
 export think='think'
 export ASCEND_RT_VISIBLE_DEVICES="0"
@@ -28,8 +28,8 @@ export lr=1e-5
 
 
 export CUDA_HOME=$CONDA_PREFIX
-ACTOR_MODEL_NAME_OR_PATH="/data/home/2401112132/models/Qwen2.5-0.5B-Instruct" # actor model path
-CRITIC_MODEL_NAME_OR_PATH="/data/home/2401112132/models/Qwen2.5-0.5B-Instruct" # critic model path
+ACTOR_MODEL_NAME_OR_PATH="~/kangshijia/models/Qwen2.5-0.5B-Instruct" # actor model path
+CRITIC_MODEL_NAME_OR_PATH="~/kangshijia/models/Qwen2.5-0.5B-Instruct" # critic model path
 
 TRAIN_DATASETS="./align_anything/utils/ragen_utils/data" # dataset path
 TRAIN_SPLIT="train" # split the rlhf dataset

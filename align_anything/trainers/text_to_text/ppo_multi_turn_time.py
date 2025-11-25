@@ -889,86 +889,169 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             self.ptx_dataloader = []
             num_ptx_replicas = 1
         
-        # 初始化计时统计
-        rollout_times = []
-        rl_step_times = []
-        total_step_times = []
+        # 设置 profiling
+        profile_activities = [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
         
-        if self.multi_turn:
-            prompt_only_batch = {"input_ids": torch.zeros(1, 1), "attention_mask": torch.zeros(1, 1)}
-            for step in range(self.cfgs.trainer.total_training_steps):
-                step_start_time = time.time()
-                
-                # 记录rollout耗时
-                rollout_start_time = time.time()
-                inference_batches, training_batches = self.rollout(prompt_only_batch)
-                rollout_time = (time.time() - rollout_start_time) * 1000  # 转换为毫秒
-                rollout_times.append(rollout_time)
+        # 创建 profiler
+        profiler = torch.profiler.profile(
+            activities=profile_activities,
+            schedule=torch.profiler.schedule(
+                wait=1,
+                warmup=1,
+                active=3,
+                repeat=1
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler('./logs'),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+        
+        # 启动 profiler
+        profiler.start()
+        
+        try:
+            if self.multi_turn:
+                prompt_only_batch = {"input_ids": torch.zeros(1, 1), "attention_mask": torch.zeros(1, 1)}
+                for step in range(self.cfgs.trainer.total_training_steps):
+                    inference_batches, training_batches = self.rollout(prompt_only_batch)
 
-                total_rl_step_time = 0
-                rl_steps_count = 0
-                
-                for _ in range(self.cfgs.train_cfgs.update_iters):
-                    for inference_batch, training_batch in zip(
-                        inference_batches, training_batches
-                    ):
-                        # 记录rl_step耗时
-                        rl_step_start_time = time.time()
-                        rl_info = self.rl_step(inference_batch, training_batch)
-                        rl_step_time = (time.time() - rl_step_start_time) * 1000  # 转换为毫秒
-                        rl_step_times.append(rl_step_time)
-                        total_rl_step_time += rl_step_time
-                        rl_steps_count += 1
-
-                        # 添加耗时信息到日志
-                        if 'timing/total' in rl_info:
-                            rl_info['train/rollout_time_ms'] = rollout_time
-                            rl_info['train/avg_rl_step_time_ms'] = total_rl_step_time / rl_steps_count if rl_steps_count > 0 else 0
-                            rl_info['train/total_step_time_ms'] = (time.time() - step_start_time) * 1000
-
-                        torch_gc()
-                        self.logger.log(rl_info, step=self.global_step)
-                        
-                        self.global_step += 1
-                        
-                        # 更新进度条描述，包含耗时信息
-                        progress_desc = (
-                            f'Training {step + 1}/{self.cfgs.trainer.total_training_steps} step '
-                            f'(reward {rl_info["train/reward"]:.4f})'
-                        )
-                        if 'timing/total' in rl_info:
-                            progress_desc += f' | rollout: {rollout_time:.0f}ms'
-                            progress_desc += f' | rl_step: {rl_step_time:.0f}ms'
-                        
-                        progress_bar.set_description(progress_desc)
-                        progress_bar.update(1)
-
-                        save_interval = (
-                            self.total_update_steps // self.cfgs.logger_cfgs.save_total_limit
-                        )
-
-                        if self.global_step % save_interval == 0:
-                            self.logger.print(f'Saving checkpoint at step {self.global_step} ...')
-                            self.save(tag=self.global_step)
-                            self.logger.print('Checkpoint saved.')
-
-                        if (
-                            self.cfgs.data_cfgs.eval_datasets
-                            and self.cfgs.train_cfgs.eval_strategy == 'steps'
-                            and self.global_step % self.cfgs.train_cfgs.eval_interval == 0
+                    for _ in range(self.cfgs.train_cfgs.update_iters):
+                        for inference_batch, training_batch in zip(
+                            inference_batches, training_batches
                         ):
-                            self.logger.print(
-                                f'\n***** Evaluating at step {self.global_step} *****',
+                            # 记录前向传播和后向传播
+                            with torch.profiler.record_function("rl_step"):
+                                rl_info = self.rl_step(inference_batch, training_batch)
+
+                            torch_gc()
+                            self.logger.log(rl_info, step=self.global_step)
+                            
+                            self.global_step += 1
+                            progress_bar.set_description(
+                                f'Training {step + 1}/{self.cfgs.trainer.total_training_steps} step '
+                                f'(reward {rl_info["train/reward"]:.4f})',
                             )
-                            self.eval()
+                            progress_bar.update(1)
+
+                            # 执行 profiling 步骤
+                            profiler.step()
+
+                            save_interval = (
+                                self.total_update_steps // self.cfgs.logger_cfgs.save_total_limit
+                            )
+
+                            if self.global_step % save_interval == 0:
+                                self.logger.print(f'Saving checkpoint at step {self.global_step} ...')
+                                self.save(tag=self.global_step)
+                                self.logger.print('Checkpoint saved.')
+
+                            if (
+                                self.cfgs.data_cfgs.eval_datasets
+                                and self.cfgs.train_cfgs.eval_strategy == 'steps'
+                                and self.global_step % self.cfgs.train_cfgs.eval_interval == 0
+                            ):
+                                self.logger.print(
+                                    f'\n***** Evaluating at step {self.global_step} *****',
+                                )
+                                self.eval()
+
+                    if self.cfgs.data_cfgs.eval_datasets and self.cfgs.train_cfgs.eval_strategy == 'epoch':
+                        self.logger.print(
+                            f'\n***** Evaluating at epoch {epoch + 1}/{self.cfgs.train_cfgs.epochs} *****',
+                        )
+                        self.eval()
+            
+            else:
+                for epoch in range(int(self.cfgs.train_cfgs.epochs)):
+                    for prompt_only_batch, ptx_batch in zip(
+                        self.prompt_only_dataloader,
+                        itertools.chain.from_iterable([self.ptx_dataloader] * num_ptx_replicas),
+                    ):
+                        inference_batches, training_batches = self.rollout(prompt_only_batch)
+
+                        if self.use_ptx:
+                            ptx_batches = self.split_ptx_micro_batches(ptx_batch)
+                        else:
+                            ptx_batches = [None for _ in range(len(inference_batches))]
+                        torch_gc()
+
+                        for _ in range(self.cfgs.train_cfgs.update_iters):
+                            for inference_batch, training_batch, ptx_batch in zip(
+                                inference_batches, training_batches, ptx_batches
+                            ):
+                                # 记录 RL 步骤
+                                with torch.profiler.record_function("rl_step"):
+                                    rl_info = self.rl_step(inference_batch, training_batch)
+
+                                torch_gc()
+                                self.logger.log(rl_info, step=self.global_step)
+                                
+                                if self.use_ptx:
+                                    # 记录 PTX 步骤
+                                    with torch.profiler.record_function("ptx_step"):
+                                        ptx_info = self.ptx_step(ptx_batch)
+                                    torch_gc()
+                                    self.logger.log(ptx_info, step=self.global_step)
+
+                                self.global_step += 1
+                                progress_bar.set_description(
+                                    f'Training {epoch + 1}/{self.cfgs.train_cfgs.epochs} epoch '
+                                    f'(reward {rl_info["train/reward"]:.4f})',
+                                )
+                                progress_bar.update(1)
+
+                                # 执行 profiling 步骤
+                                profiler.step()
+
+                                save_interval = (
+                                    self.total_update_steps // self.cfgs.logger_cfgs.save_total_limit
+                                )
+
+                                if self.global_step % save_interval == 0:
+                                    self.logger.print(f'Saving checkpoint at step {self.global_step} ...')
+                                    self.save(tag=self.global_step)
+                                    self.logger.print('Checkpoint saved.')
+
+                                if (
+                                    self.cfgs.data_cfgs.eval_datasets
+                                    and self.cfgs.train_cfgs.eval_strategy == 'steps'
+                                    and self.global_step % self.cfgs.train_cfgs.eval_interval == 0
+                                ):
+                                    self.logger.print(
+                                        f'\n***** Evaluating at step {self.global_step} *****',
+                                    )
+                                    self.eval()
+
+                    if self.cfgs.data_cfgs.eval_datasets and self.cfgs.train_cfgs.eval_strategy == 'epoch':
+                        self.logger.print(
+                            f'\n***** Evaluating at epoch {epoch + 1}/{self.cfgs.train_cfgs.epochs} *****',
+                        )
+                        self.eval()
+        
+        finally:
+            # 停止 profiler
+            profiler.stop()
+            
+            # 打印 profiling 结果摘要
+            if is_main_process():
+                self.logger.print("\n***** Profiling Results *****")
+                self.logger.print(profiler.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+                
+                # 保存 profiling 结果到文件
+                profiler.export_chrome_trace(f"training_trace_step_{self.global_step}.json")
+                self.logger.print(f"Profiling trace saved to training_trace_step_{self.global_step}.json")
 
                 # 记录总步骤耗时
-                total_step_time = (time.time() - step_start_time) * 1000
-                total_step_times.append(total_step_time)
+                # total_step_time = (time.time() - step_start_time) * 1000
+                # total_step_times.append(total_step_time)
                 
-                # 定期打印耗时统计摘要
-                if is_main_process() and (step + 1) % 20 == 0:  # 每20步打印一次统计
-                    self._print_timing_summary(step + 1, rollout_times, rl_step_times, total_step_times)
+                # # 定期打印耗时统计摘要
+                # if is_main_process() and (step + 1) % 20 == 0:  # 每20步打印一次统计
+                #     self._print_timing_summary(step + 1, rollout_times, rl_step_times, total_step_times)
 
 
     def _print_timing_summary(self, current_step, rollout_times, rl_step_times, total_step_times):
