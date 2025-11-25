@@ -145,7 +145,7 @@ agent_proxy:
   action_sep: "||"
   max_actions_per_turn: 5
   use_turn_scores: false
-  enable_think: true
+  enable_think: False
   reward_normalization:
     grouping: "state"
     method: "identity"

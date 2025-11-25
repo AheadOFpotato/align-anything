@@ -426,3 +426,4 @@ tags
 local_scripts/
 
 *.gradio/
+logs_npu

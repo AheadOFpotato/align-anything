@@ -27,12 +27,14 @@ from typing import Any
 import deepspeed
 import torch
 import torch.distributed as dist
+from torch.autograd.profiler import record_function
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import numpy as np
 from tqdm import tqdm
 from transformers import GenerationConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
+from torch_npu import profiler as npu_profiler
 
 from align_anything.datasets.text_to_text import (
     PromptOnlyBatch,
@@ -856,6 +858,8 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             'train/ptx_loss': ptx_loss.item(),
         }
 
+
+
     def train(self) -> None:
         """Train the model."""
         self.logger.print('***** Running training *****')
@@ -889,28 +893,31 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
             self.ptx_dataloader = []
             num_ptx_replicas = 1
         
-        # 设置 profiling
+        # ===================== 设置 NPU profiling =====================
         profile_activities = [
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
+            npu_profiler.ProfilerActivity.CPU,
+            npu_profiler.ProfilerActivity.NPU,
         ]
         
-        # 创建 profiler
-        profiler = torch.profiler.profile(
+        profiler = npu_profiler.profile(
             activities=profile_activities,
-            schedule=torch.profiler.schedule(
+            schedule=npu_profiler.schedule(
                 wait=1,
                 warmup=1,
                 active=3,
-                repeat=1
+                repeat=1,
             ),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler('./logs'),
+            on_trace_ready=npu_profiler.tensorboard_trace_handler('./logs_npu'),
             record_shapes=True,
             profile_memory=True,
             with_stack=True,
+
+            experimental_config=npu_profiler._ExperimentalConfig(
+                aic_metrics=npu_profiler.AiCMetrics.PipeUtilization,
+                profiler_level=npu_profiler.ProfilerLevel.Level0,
+            ),
         )
         
-        # 启动 profiler
         profiler.start()
         
         try:
@@ -924,7 +931,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                             inference_batches, training_batches
                         ):
                             # 记录前向传播和后向传播
-                            with torch.profiler.record_function("rl_step"):
+                            with record_function("rl_step"):
                                 rl_info = self.rl_step(inference_batch, training_batch)
 
                             torch_gc()
@@ -959,12 +966,12 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                                 )
                                 self.eval()
 
-                    if self.cfgs.data_cfgs.eval_datasets and self.cfgs.train_cfgs.eval_strategy == 'epoch':
-                        self.logger.print(
-                            f'\n***** Evaluating at epoch {epoch + 1}/{self.cfgs.train_cfgs.epochs} *****',
-                        )
-                        self.eval()
-            
+                if self.cfgs.data_cfgs.eval_datasets and self.cfgs.train_cfgs.eval_strategy == 'epoch':
+                    self.logger.print(
+                        f'\n***** Evaluating at epoch {epoch + 1}/{self.cfgs.train_cfgs.epochs} *****',
+                    )
+                    self.eval()
+        
             else:
                 for epoch in range(int(self.cfgs.train_cfgs.epochs)):
                     for prompt_only_batch, ptx_batch in zip(
@@ -984,7 +991,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                                 inference_batches, training_batches, ptx_batches
                             ):
                                 # 记录 RL 步骤
-                                with torch.profiler.record_function("rl_step"):
+                                with record_function("rl_step"):
                                     rl_info = self.rl_step(inference_batch, training_batch)
 
                                 torch_gc()
@@ -992,7 +999,7 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                                 
                                 if self.use_ptx:
                                     # 记录 PTX 步骤
-                                    with torch.profiler.record_function("ptx_step"):
+                                    with record_function("ptx_step"):
                                         ptx_info = self.ptx_step(ptx_batch)
                                     torch_gc()
                                     self.logger.log(ptx_info, step=self.global_step)
@@ -1033,25 +1040,28 @@ class PPOTrainer(RLTrainerBase):  # pylint: disable=too-many-instance-attributes
                         self.eval()
         
         finally:
-            # 停止 profiler
             profiler.stop()
             
-            # 打印 profiling 结果摘要
             if is_main_process():
-                self.logger.print("\n***** Profiling Results *****")
-                self.logger.print(profiler.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+                self.logger.print("\n***** Profiling Results (Ascend NPU) *****")
+                # 按 NPU 时间排序（不同版本字段名可能是 npu_time_total/self_npu_time_total）
+                # try:
+                #     self.logger.print(
+                #         profiler.key_averages().table(sort_by="npu_time_total", row_limit=20)
+                #     )
+                # except Exception:
+                #     # 兜底：如果字段名不同，至少能打一个表出来
+                #     self.logger.print(profiler.key_averages().table(row_limit=20))
                 
-                # 保存 profiling 结果到文件
-                profiler.export_chrome_trace(f"training_trace_step_{self.global_step}.json")
-                self.logger.print(f"Profiling trace saved to training_trace_step_{self.global_step}.json")
-
-                # 记录总步骤耗时
-                # total_step_time = (time.time() - step_start_time) * 1000
-                # total_step_times.append(total_step_time)
-                
-                # # 定期打印耗时统计摘要
-                # if is_main_process() and (step + 1) % 20 == 0:  # 每20步打印一次统计
-                #     self._print_timing_summary(step + 1, rollout_times, rl_step_times, total_step_times)
+                # 如果当前版本支持，也可以导出 chrome trace
+                try:
+                    profiler.export_chrome_trace(f"training_trace_step_{self.global_step}.json")
+                    self.logger.print(
+                        f"Profiling trace saved to training_trace_step_{self.global_step}.json"
+                    )
+                except AttributeError:
+                    self.logger.print("export_chrome_trace not supported in this torch_npu version.")
+                self.logger.print("TensorBoard trace is under ./logs_npu")
 
 
     def _print_timing_summary(self, current_step, rollout_times, rl_step_times, total_step_times):
